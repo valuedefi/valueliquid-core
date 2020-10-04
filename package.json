@@ -1,0 +1,52 @@
+{
+    "private": true,
+    "name": "valueliquid-core",
+    "version": "0.0.7",
+    "license": "GPL-3.0-only",
+    "description": "Value Liquid Core Contracts and ABI",
+    "scripts": {
+        "compile": "truffle compile",
+        "testrpc": "ganache-cli --deterministic --gasLimit 10000000",
+        "test": "truffle test",
+        "test:verbose": "VERBOSE=true truffle test",
+        "coverage": "yarn solidity-coverage",
+        "lint": "eslint .",
+        "lint:contracts": "solhint contracts/*.sol",
+        "flat:contracts": "sol-merger \"./contracts/*.sol\" ./build",
+        "flat:contracts-legacy": "sol-merger \"./contracts/legacy/*.sol\" ./build/legacy"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/yfv-finance/valueliquid-core.git"
+    },
+    "bugs": {
+        "url": "https://github.com/yfv-finance/valueliquid-core/issues"
+    },
+    "homepage": "https://github.com/yfv-finance/valueliquid-core#readme",
+    "devDependencies": {
+        "chai": "^4.2.0",
+        "coveralls": "^3.0.8",
+        "eslint": "^6.7.1",
+        "eslint-config-airbnb": "^18.0.1",
+        "eslint-plugin-import": "^2.18.2",
+        "eslint-plugin-jsx-a11y": "^6.2.3",
+        "eslint-plugin-react": "^7.17.0",
+        "@truffle/hdwallet-provider": "^1.1.0",
+        "truffle-plugin-verify": "^0.3.11",
+        "dotenv": "^8.2.0",
+        "ganache-core": "^2.6.1",
+        "mocha": "^6.2.0",
+        "solhint": "^2.3.0",
+        "solidity-coverage": "^0.6.7",
+        "standard": "^14.0.2",
+        "truffle": "^5.1.45",
+        "truffle-assertions": "^0.9.1",
+        "web3": "^1.2.0",
+        "sol-merger": "^3.1.0"
+    },
+    "dependencies": {
+        "decimal.js": "^10.2.0",
+        "ganache-cli": "^6.10.2",
+        "global": "^4.4.0"
+    }
+}
