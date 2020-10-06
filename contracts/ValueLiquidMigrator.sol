@@ -1,4 +1,4 @@
-pragma solidity >=0.5.0;
+pragma solidity 0.6.12;
 
 import "./BFactory.sol";
 import "./BPool.sol";
@@ -22,56 +22,99 @@ interface ILegacyBPool {
     function isPublicSwap() external view returns (bool);
 }
 
+interface IUniswapV2Pair {
+    function balanceOf(address owner) external view returns (uint);
+    function transferFrom(address from, address to, uint value) external returns (bool);
+    function factory() external view returns (address);
+    function token0() external view returns (address);
+    function token1() external view returns (address);
+    function burn(address to) external returns (uint amount0, uint amount1);
+}
+
 contract ValueLiquidMigrator {
-    address public owner;
+    address public governance;
     BFactory public factory;
     IToken public yfv;
     IToken public value;
-    uint public notBeforeBlock;
+    bool public useDefaultSwapFee;
 
     constructor(
         BFactory _factory,
         IToken _yfv,
-        IToken _value,
-        uint _notBeforeBlock
+        IToken _value
     ) public {
-        owner = tx.origin;
+        governance = tx.origin;
         factory = _factory;
         yfv = _yfv;
         value = _value;
-        notBeforeBlock = _notBeforeBlock;
-        yfv.approve(address(value), type(uint256).max);
+        useDefaultSwapFee = true;
+        yfv.approve(address(value), uint256(-1));
     }
 
-    function migrate(ILegacyBPool orig) public returns (BPool) {
-        require(block.number >= notBeforeBlock, "too early to migrate");
+    function setGovernance(address _governance) external {
+        require(msg.sender == governance, "!governance");
+        governance = _governance;
+    }
 
-        uint _origBptAmount = orig.balanceOf(msg.sender);
-        require(_origBptAmount > 0, "lp balance must be greater than zero");
+    function setUseDefaultSwapFee(bool _useDefaultSwapFee) external {
+        require(msg.sender == governance, "!governance");
+        useDefaultSwapFee = _useDefaultSwapFee;
+    }
 
-        address[] memory _tokens = orig.getFinalTokens();
-        uint i;
-        for (i = 0; i < _tokens.length; i++) {
-            // Transfer tokens to owner before migrate (to ensure all tokens is empty)
-            IToken _token = IToken(_tokens[i]);
-            uint _tokenBal = _token.balanceOf(address(this));
-            if (_tokenBal > 0) {
-                _pushUnderlying(address(_token), owner, _tokenBal);
-            }
+    function _isUniswapV2Pair(address _addr) private returns (bool) {
+        bytes memory uniswapV2PairIoken0FuncSelectorData = abi.encodePacked(bytes4(keccak256("token0()")));
+        bool success = false;
+        assembly {
+            success := call(
+            5000,          // gas remaining
+            _addr,         // destination address
+            0,             // no ether
+            add(uniswapV2PairIoken0FuncSelectorData, 32),  // input buffer (starts after the first 32 bytes in the `data` array)
+            mload(uniswapV2PairIoken0FuncSelectorData),    // input length (loaded from the first 32 bytes in the `data` array)
+            0,              // output buffer
+            0               // output length
+            )
         }
-        _pullUnderlying(address(orig), msg.sender, _origBptAmount);
+        return success;
+    }
+
+    function migrate(address _orig) public returns (BPool) {
+        uint _origAmount = IToken(_orig).balanceOf(msg.sender);
+        require(_origAmount > 0, "lp balance must be greater than zero");
+
+        if (_orig == address(yfv)) {
+            // wrap YFV -> VALUE and forward back
+            _pullUnderlying(_orig, msg.sender, _origAmount);
+            value.deposit(_origAmount);
+            require(value.balanceOf(address(this)) == _origAmount, "bal(value) != _origAmount");
+            _pushUnderlying(address(value), msg.sender, _origAmount);
+            return BPool(address(value));
+        } else if (_isUniswapV2Pair(_orig)) {
+            // is IUniswapV2Pair
+            return _migrateUniswapV2Pair(IUniswapV2Pair(_orig), _origAmount);
+        } else {
+            // is ILegacyBPool
+            _pullUnderlying(_orig, msg.sender, _origAmount);
+            return _migrateBPool(ILegacyBPool(_orig), _origAmount);
+        }
+    }
+
+    function _migrateBPool(ILegacyBPool _orig, uint _origAmount) internal returns (BPool) {
+        address[] memory _tokens = _orig.getFinalTokens();
         uint[] memory minAmountsOut = new uint[](_tokens.length);
-        orig.exitPool(_origBptAmount, minAmountsOut);
+        _orig.exitPool(_origAmount, minAmountsOut);
 
         BPool _newPool = factory.newBPool();
-        _newPool.setInitPoolSupply(_origBptAmount);
-        _newPool.setSwapFee(orig.getSwapFee());
-        _newPool.setPublicSwap(orig.isPublicSwap());
+        _newPool.setInitPoolSupply(_origAmount);
+        if (!useDefaultSwapFee) {
+            _newPool.setSwapFee(_orig.getSwapFee());
+        }
+        _newPool.setPublicSwap(_orig.isPublicSwap());
 
-        for (i = 0; i < _tokens.length; i++) {
+        for (uint8 i = 0; i < _tokens.length; ++i) {
             IToken _token = IToken(_tokens[i]);
             uint _tokenBal = _token.balanceOf(address(this));
-            uint _denormWeight = orig.getDenormalizedWeight(_tokens[i]);
+            uint _denormWeight = _orig.getDenormalizedWeight(_tokens[i]);
             if (_tokens[i] == address(yfv)) {
                 value.deposit(_tokenBal);
                 require(value.balanceOf(address(this)) == _tokenBal, "bal(value) != bal(yfv)");
@@ -85,9 +128,45 @@ contract ValueLiquidMigrator {
             }
             _newPool.bind(_tokens[i], _tokenBal, _denormWeight);
         }
+
         _newPool.finalize();
-        require(_newPool.balanceOf(address(this)) == _origBptAmount, "bal(_newPool) != _origBptAmount");
-        _pushUnderlying(address(_newPool), msg.sender, _origBptAmount);
+        require(_newPool.balanceOf(address(this)) == _origAmount, "bal(_newPool) != _origBptAmount");
+        _pushUnderlying(address(_newPool), msg.sender, _origAmount);
+
+        return _newPool;
+    }
+
+    function _migrateUniswapV2Pair(IUniswapV2Pair _orig, uint _origAmount) internal returns (BPool) {
+        _orig.transferFrom(msg.sender, address(_orig), _origAmount);
+        _orig.burn(address(this));
+
+        BPool _newPool = factory.newBPool();
+        _newPool.setInitPoolSupply(_origAmount);
+
+        address[] memory _tokens = new address[](2);
+        _tokens[0] = _orig.token0();
+        _tokens[1] = _orig.token1();
+
+        for (uint8 i = 0; i < 2; ++i) {
+            IToken _token = IToken(_tokens[i]);
+            uint _tokenBal = _token.balanceOf(address(this));
+            if (_tokens[i] == address(yfv)) {
+                value.deposit(_tokenBal);
+                require(value.balanceOf(address(this)) == _tokenBal, "bal(value) != bal(yfv)");
+                _tokens[i] = address(value);
+                _token = value;
+            }
+            uint _tokenAllow = _token.allowance(address(this), address(_newPool));
+            if (_tokenAllow < _tokenBal) {
+                if (_tokenAllow > 0) _token.approve(address(_newPool), 0);
+                _token.approve(address(_newPool), _tokenBal);
+            }
+            _newPool.bind(_tokens[i], _tokenBal, 25 ether);
+        }
+
+        _newPool.finalize();
+        require(_newPool.balanceOf(address(this)) == _origAmount, "bal(_newPool) != _origBptAmount");
+        _pushUnderlying(address(_newPool), msg.sender, _origAmount);
 
         return _newPool;
     }
@@ -105,4 +184,22 @@ contract ValueLiquidMigrator {
         bool xfer = IToken(erc20).transfer(to, amount);
         require(xfer, "errErc20");
     }
+
+    /**
+     * This function allows governance to take unsupported tokens out of the contract.
+     * This is in an effort to make someone whole, should they seriously mess up.
+     * There is no guarantee governance will vote to return these.
+     * It also allows for removal of airdropped tokens.
+     */
+    function governanceRecoverUnsupported(IToken _token, uint _amount, address _to) external {
+        require(msg.sender == governance, "!governance");
+        if (address(_token) == address(0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE)) {
+            (bool xfer,) = _to.call{value : _amount}("");
+            require(xfer, "ERR_ETH_FAILED");
+        } else {
+            require(_token.transfer(_to, _amount), "ERR_TRANSFER_FAILED");
+        }
+    }
+
+    receive() external payable {}
 }

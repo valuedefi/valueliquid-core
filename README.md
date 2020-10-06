@@ -1,5 +1,5 @@
 <p align=center>
-<img width="128px" src="" alt="Value logo"/>
+<img width="128px" src="https://assets.coingecko.com/coins/images/12525/small/value_logo_-_500x500.png" alt="Value logo"/>
 </p>
 
 <h1 align=center><code>Value Liquid</code></h1>
