@@ -89,8 +89,8 @@ contract BPool is BToken, BMath {
     uint public exitFee;
     bool public finalized;
 
-    address[] private _tokens;
-    mapping(address => Record) private _records;
+    address[] internal _tokens;
+    mapping(address => Record) internal _records;
     uint private _totalWeight;
 
     constructor(address _factory) public {
@@ -135,7 +135,7 @@ contract BPool is BToken, BMath {
 
     function getNumTokens()
         external view
-        returns (uint) 
+        returns (uint)
     {
         return _tokens.length;
     }
@@ -286,7 +286,7 @@ contract BPool is BToken, BMath {
             require(_totalWeight <= BConst.MAX_TOTAL_WEIGHT, ">maxTWeight");
         } else if (denorm < oldWeight) {
             _totalWeight = bsub(_totalWeight, bsub(oldWeight, denorm));
-        }        
+        }
         _records[token].denorm = denorm;
 
         // Adjust the balance record and actual token balance
@@ -371,7 +371,7 @@ contract BPool is BToken, BMath {
     }
 
     function joinPool(uint poolAmountOut, uint[] calldata maxAmountsIn)
-        external
+        external virtual
         _lock_
         _logs_
     {
@@ -396,7 +396,7 @@ contract BPool is BToken, BMath {
     }
 
     function exitPool(uint poolAmountIn, uint[] calldata minAmountsOut)
-        external
+        external virtual
         _lock_
         _logs_
     {
@@ -423,7 +423,6 @@ contract BPool is BToken, BMath {
             _pushUnderlying(t, msg.sender, tokenAmountOut);
         }
     }
-
 
     function swapExactAmountIn(
         address tokenIn,
@@ -562,7 +561,7 @@ contract BPool is BToken, BMath {
         _logs_
         returns (uint poolAmountOut)
 
-    {        
+    {
         require(finalized, "!finalized");
         require(_records[tokenIn].bound, "!bound");
         require(tokenAmountIn <= bmul(_records[tokenIn].balance, BConst.MAX_IN_RATIO), ">maxIRat");
@@ -616,7 +615,7 @@ contract BPool is BToken, BMath {
 
         require(tokenAmountIn != 0, "errMathAprox");
         require(tokenAmountIn <= maxAmountIn, "<limIn");
-        
+
         require(tokenAmountIn <= bmul(_records[tokenIn].balance, BConst.MAX_IN_RATIO), ">maxIRat");
 
         inRecord.balance = badd(inRecord.balance, tokenAmountIn);
@@ -654,7 +653,7 @@ contract BPool is BToken, BMath {
                         );
 
         require(tokenAmountOut >= minAmountOut, "<limO");
-        
+
         require(tokenAmountOut <= bmul(_records[tokenOut].balance, BConst.MAX_OUT_RATIO), ">maxORat");
 
         outRecord.balance = bsub(outRecord.balance, tokenAmountOut);
@@ -712,23 +711,22 @@ contract BPool is BToken, BMath {
         return poolAmountIn;
     }
 
-
     // ==
     // 'Underlying' token-manipulation functions make external calls but are NOT locked
     // You must `_lock_` or otherwise ensure reentry-safety
-
-    function _pullUnderlying(address erc20, address from, uint amount)
-        internal
-    {
-        bool xfer = IERC20(erc20).transferFrom(from, address(this), amount);
-        require(xfer, "errErc20");
+    //
+    // Fixed ERC-20 transfer revert for some special token such as USDT
+    function _pullUnderlying(address erc20, address from, uint amount) internal {
+        // bytes4(keccak256(bytes('transferFrom(address,address,uint256)')));
+        (bool success, bytes memory data) = erc20.call(abi.encodeWithSelector(0x23b872dd, from, address(this), amount));
+        require(success && (data.length == 0 || abi.decode(data, (bool))), '_pullUnderlying failed');
     }
 
-    function _pushUnderlying(address erc20, address to, uint amount)
-        internal
+    function _pushUnderlying(address erc20, address to, uint amount) internal
     {
-        bool xfer = IERC20(erc20).transfer(to, amount);
-        require(xfer, "errErc20");
+        // bytes4(keccak256(bytes('transfer(address,uint256)')));
+        (bool success, bytes memory data) = erc20.call(abi.encodeWithSelector(0xa9059cbb, to, amount));
+        require(success && (data.length == 0 || abi.decode(data, (bool))), '_pushUnderlying failed');
     }
 
     function _pullPoolShare(address from, uint amount)
