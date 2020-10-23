@@ -3,7 +3,7 @@
 pragma solidity 0.6.12;
 
 import "@openzeppelin/contracts/math/SafeMath.sol";
-import "./BPool.sol";
+import "./BPoolLite.sol";
 import "./IFaaSPool.sol";
 
 interface IFaaSRewardFund {
@@ -12,7 +12,7 @@ interface IFaaSRewardFund {
 }
 
 // This implements BPool contract, and allows for generalized staking, yield farming, and token distribution.
-contract FaaSPool is BPool, IFaaSPool {
+contract FaaSPoolLite is BPoolLite, IFaaSPool {
     using SafeMath for uint;
 
     // Info of each user.
@@ -52,7 +52,7 @@ contract FaaSPool is BPool, IFaaSPool {
     event Deposit(address indexed account, uint256 amount);
     event Withdraw(address indexed account, uint256 amount);
 
-    constructor(address _factory) public BPool(_factory) {
+    constructor(address _factory) public BPoolLite(_factory) {
     }
 
     modifier onlyController() {
@@ -102,26 +102,26 @@ contract FaaSPool is BPool, IFaaSPool {
         rewardPool.rewardPerBlock = _rewardPerBlock;
     }
 
-    function joinPool(uint rewardAmountOut, uint[] calldata maxAmountsIn) external override {
-        joinPoolFor(msg.sender, rewardAmountOut, maxAmountsIn);
+    function joinPool(uint poolAmountOut, uint[] calldata maxAmountsIn) external override {
+        joinPoolFor(msg.sender, poolAmountOut, maxAmountsIn);
     }
 
-    function joinPoolFor(address account, uint rewardAmountOut, uint[] calldata maxAmountsIn) public _lock_ {
+    function joinPoolFor(address account, uint poolAmountOut, uint[] calldata maxAmountsIn) public _lock_ {
         require(msg.sender == account || msg.sender == exchangeProxy, "!(prx||own)");
-        _joinPool(rewardAmountOut, maxAmountsIn);
-        _stakePoolShare(account, rewardAmountOut);
+        _joinPool(poolAmountOut, maxAmountsIn);
+        _stakePoolShare(account, poolAmountOut);
     }
 
-    function joinPoolNotStake(uint rewardAmountOut, uint[] calldata maxAmountsIn) external _lock_ {
-        _joinPool(rewardAmountOut, maxAmountsIn);
-        _pushPoolShare(msg.sender, rewardAmountOut);
+    function joinPoolNotStake(uint poolAmountOut, uint[] calldata maxAmountsIn) external _lock_ {
+        _joinPool(poolAmountOut, maxAmountsIn);
+        _pushPoolShare(msg.sender, poolAmountOut);
     }
 
-    function _joinPool(uint rewardAmountOut, uint[] calldata maxAmountsIn) internal {
+    function _joinPool(uint poolAmountOut, uint[] calldata maxAmountsIn) internal {
         require(finalized, "!fnl");
 
         uint rewardTotal = totalSupply();
-        uint ratio = bdiv(rewardAmountOut, rewardTotal);
+        uint ratio = bdiv(poolAmountOut, rewardTotal);
         require(ratio != 0, "erMApr");
 
         for (uint i = 0; i < _tokens.length; i++) {
@@ -133,7 +133,7 @@ contract FaaSPool is BPool, IFaaSPool {
             emit LOG_JOIN(msg.sender, t, tokenAmountIn);
             _pullUnderlying(t, msg.sender, tokenAmountIn);
         }
-        _mintPoolShare(rewardAmountOut);
+        _mintPoolShare(poolAmountOut);
     }
 
     function stake(uint _shares) external override {
@@ -240,12 +240,14 @@ contract FaaSPool is BPool, IFaaSPool {
     // Withdraw without caring about rewards. EMERGENCY ONLY.
     function emergencyWithdraw() external override {
         UserInfo storage user = userInfo[msg.sender];
-        _pushPoolShare(msg.sender, user.amount);
+        uint _amount = user.amount;
+        _pushPoolShare(msg.sender, _amount);
         user.amount = 0;
         uint8 rewardPoolLength = uint8(rewardPoolInfo.length);
         for (uint8 _pid = 0; _pid < rewardPoolLength; ++_pid) {
             user.rewardDebt[_pid] = 0;
         }
+        emit Withdraw(msg.sender, _amount);
     }
 
     function getUserInfo(uint8 _pid, address _account) public view returns (uint amount, uint rewardDebt, uint accumulatedEarned, uint lockReward, uint lockRewardReleased) {
@@ -257,24 +259,24 @@ contract FaaSPool is BPool, IFaaSPool {
         lockRewardReleased = user.lockRewardReleased[_pid];
     }
 
-    function exitPool(uint rewardAmountIn, uint[] calldata minAmountsOut) external override _lock_ {
+    function exitPool(uint poolAmountIn, uint[] calldata minAmountsOut) external override _lock_ {
         require(finalized, "!fnl");
 
         uint rewardTotal = totalSupply();
-        uint _exitFee = bmul(rewardAmountIn, exitFee);
-        uint pAiAfterExitFee = bsub(rewardAmountIn, _exitFee);
+        uint _exitFee = bmul(poolAmountIn, exitFee);
+        uint pAiAfterExitFee = bsub(poolAmountIn, _exitFee);
         uint ratio = bdiv(pAiAfterExitFee, rewardTotal);
         require(ratio != 0, "erMApr");
 
         uint _externalShares = balanceOf(msg.sender);
-        if (_externalShares < rewardAmountIn) {
-            uint _withdrawShares = bsub(rewardAmountIn, _externalShares);
+        if (_externalShares < poolAmountIn) {
+            uint _withdrawShares = bsub(poolAmountIn, _externalShares);
             uint _stakedShares = userInfo[msg.sender].amount;
             require(_stakedShares >= _withdrawShares, "stk<wdr");
             withdraw(_withdrawShares);
         }
 
-        _pullPoolShare(msg.sender, rewardAmountIn);
+        _pullPoolShare(msg.sender, poolAmountIn);
         if (_exitFee > 0) {
             _pushPoolShare(factory, _exitFee);
         }
