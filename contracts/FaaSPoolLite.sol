@@ -39,7 +39,6 @@ contract FaaSPoolLite is BPoolLite, IFaaSPool {
         uint numOfVestingBlocks;
 
         uint totalPaidRewards;
-        uint totalLockedRewards;
     }
 
     mapping(address => UserInfo) private userInfo;
@@ -47,10 +46,11 @@ contract FaaSPoolLite is BPoolLite, IFaaSPool {
 
     IFaaSRewardFund public rewardFund;
     address public exchangeProxy;
-    uint public unstakingFrozenTime = 3 days;
+    uint public unstakingFrozenTime = 0 days;
 
     event Deposit(address indexed account, uint256 amount);
     event Withdraw(address indexed account, uint256 amount);
+    event RewardPaid(uint8 pid, address indexed account, uint256 amount);
 
     constructor(address _factory) public BPoolLite(_factory) {
     }
@@ -60,7 +60,11 @@ contract FaaSPoolLite is BPoolLite, IFaaSPool {
         _;
     }
 
-    function setRewardFund(IFaaSRewardFund _rewardFund) public onlyController {
+    function finalizeRewardFundInfo(IFaaSRewardFund _rewardFund, uint _unstakingFrozenTime) external onlyController {
+        require(address(rewardFund) == address(0), "rewardFund!=null");
+        assert(unstakingFrozenTime <= 30 days);
+        // do not lock fund for too long, please!
+        unstakingFrozenTime = _unstakingFrozenTime;
         rewardFund = _rewardFund;
     }
 
@@ -68,14 +72,11 @@ contract FaaSPoolLite is BPoolLite, IFaaSPool {
         exchangeProxy = _exchangeProxy;
     }
 
-    function setUnstakingFrozenTime(uint _unstakingFrozenTime) public onlyController {
-        assert(unstakingFrozenTime <= 30 days); // do not lock fund for too long, please!
-        unstakingFrozenTime = _unstakingFrozenTime;
-    }
-
     function addRewardPool(IERC20 _rewardToken, uint256 _startBlock, uint256 _endRewardBlock, uint256 _rewardPerBlock,
-        uint256 _lockRewardPercent, uint256 _startVestingBlock, uint256 _endVestingBlock) public onlyController {
+        uint256 _lockRewardPercent, uint256 _startVestingBlock, uint256 _endVestingBlock) external onlyController {
+        require(rewardPoolInfo.length < 8, "exceed rwdPoolLim");
         require(_startVestingBlock <= _endVestingBlock, "sVB>eVB");
+        require(_lockRewardPercent <= 100, "exceed _lockRewardPercent");
         _startBlock = (block.number > _startBlock) ? block.number : _startBlock;
         require(_startBlock < _endRewardBlock, "sB>=eB");
         updateReward();
@@ -89,15 +90,14 @@ contract FaaSPoolLite is BPoolLite, IFaaSPool {
             startVestingBlock : _startVestingBlock,
             endVestingBlock : _endVestingBlock,
             numOfVestingBlocks: _endVestingBlock - _startVestingBlock,
-            totalPaidRewards: 0,
-            totalLockedRewards: 0
+            totalPaidRewards: 0
             }));
     }
 
     function updateRewardPool(uint8 _pid, uint256 _endRewardBlock, uint256 _rewardPerBlock) public onlyController {
-        updateReward(_pid);
         RewardPoolInfo storage rewardPool = rewardPoolInfo[_pid];
-        require(block.number <= rewardPool.endRewardBlock, "late");
+        require(block.number <= rewardPool.endRewardBlock && block.number <= _endRewardBlock, "late");
+        updateReward(_pid);
         rewardPool.endRewardBlock = _endRewardBlock;
         rewardPool.rewardPerBlock = _rewardPerBlock;
     }
@@ -108,16 +108,16 @@ contract FaaSPoolLite is BPoolLite, IFaaSPool {
 
     function joinPoolFor(address account, uint poolAmountOut, uint[] calldata maxAmountsIn) public _lock_ {
         require(msg.sender == account || msg.sender == exchangeProxy, "!(prx||own)");
-        _joinPool(poolAmountOut, maxAmountsIn);
+        _joinPool(account, poolAmountOut, maxAmountsIn);
         _stakePoolShare(account, poolAmountOut);
     }
 
     function joinPoolNotStake(uint poolAmountOut, uint[] calldata maxAmountsIn) external _lock_ {
-        _joinPool(poolAmountOut, maxAmountsIn);
+        _joinPool(msg.sender, poolAmountOut, maxAmountsIn);
         _pushPoolShare(msg.sender, poolAmountOut);
     }
 
-    function _joinPool(uint poolAmountOut, uint[] calldata maxAmountsIn) internal {
+    function _joinPool(address account, uint poolAmountOut, uint[] calldata maxAmountsIn) internal {
         require(finalized, "!fnl");
 
         uint rewardTotal = totalSupply();
@@ -130,7 +130,7 @@ contract FaaSPoolLite is BPoolLite, IFaaSPool {
             uint tokenAmountIn = bmul(ratio, bal);
             require(tokenAmountIn != 0 && tokenAmountIn <= maxAmountsIn[i], "erMApr||<limIn");
             _records[t].balance = badd(_records[t].balance, tokenAmountIn);
-            emit LOG_JOIN(msg.sender, t, tokenAmountIn);
+            emit LOG_JOIN(account, t, tokenAmountIn);
             _pullUnderlying(t, msg.sender, tokenAmountIn);
         }
         _mintPoolShare(poolAmountOut);
@@ -192,7 +192,6 @@ contract FaaSPoolLite is BPoolLite, IFaaSPool {
             if (block.number > rewardPool.endVestingBlock) {
                 uint _unlockReward = user.lockReward[_pid].sub(user.lockRewardReleased[_pid]);
                 if (_unlockReward > 0) {
-                    rewardPool.totalLockedRewards = rewardPool.totalLockedRewards.sub(_unlockReward);
                     _pendingReward = _pendingReward.add(_unlockReward);
                     user.lockRewardReleased[_pid] = user.lockRewardReleased[_pid].add(_unlockReward);
                 }
@@ -201,7 +200,6 @@ contract FaaSPoolLite is BPoolLite, IFaaSPool {
                     uint _toLocked = _pendingReward.mul(_lockRewardPercent).div(100);
                     _pendingReward = _pendingReward.sub(_toLocked);
                     user.lockReward[_pid] = user.lockReward[_pid].add(_toLocked);
-                    rewardPool.totalLockedRewards = rewardPool.totalLockedRewards.add(_toLocked);
                 }
                 if (block.number > rewardPool.startVestingBlock) {
                     uint _toReleased = user.lockReward[_pid].mul(block.number.sub(rewardPool.startVestingBlock)).div(rewardPool.numOfVestingBlocks);
@@ -209,7 +207,6 @@ contract FaaSPoolLite is BPoolLite, IFaaSPool {
                     if (_toReleased > _lockRewardReleased) {
                         uint _unlockReward = _toReleased.sub(_lockRewardReleased);
                         user.lockRewardReleased[_pid] = _lockRewardReleased.add(_unlockReward);
-                        rewardPool.totalLockedRewards = rewardPool.totalLockedRewards.sub(_unlockReward);
                         _pendingReward = _pendingReward.add(_unlockReward);
                     }
                 }
@@ -219,6 +216,7 @@ contract FaaSPoolLite is BPoolLite, IFaaSPool {
             user.accumulatedEarned[_pid] = user.accumulatedEarned[_pid].add(_pendingReward);
             rewardPool.totalPaidRewards = rewardPool.totalPaidRewards.add(_pendingReward);
             rewardFund.safeTransfer(rewardPool.rewardToken, _account, _pendingReward);
+            emit RewardPaid(_pid, _account, _pendingReward);
             user.rewardDebt[_pid] = user.amount.mul(rewardPoolInfo[_pid].accRewardPerShare).div(1e18);
         }
     }

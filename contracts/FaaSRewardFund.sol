@@ -6,14 +6,128 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
 
 // Token pool of arbitrary ERC20 token.
-// This is owned and used by a parent Geyser
+// This is owned and used by a parent FaaSPool.
 contract FaaSRewardFund {
     using SafeERC20 for IERC20;
-    address public faasPool;
+    using SafeMath for uint256;
 
-    constructor(address _faasPool) public {
-        faasPool = _faasPool;
+    event NewAdmin(address indexed newAdmin);
+    event NewPendingAdmin(address indexed newPendingAdmin);
+    event NewDelay(uint indexed newDelay);
+    event CancelTransaction(bytes32 indexed txHash, address indexed target, uint value, string signature, bytes data, uint eta);
+    event ExecuteTransaction(bytes32 indexed txHash, address indexed target, uint value, string signature, bytes data, uint eta);
+    event QueueTransaction(bytes32 indexed txHash, address indexed target, uint value, string signature, bytes data, uint eta);
+
+    uint public constant GRACE_PERIOD = 14 days;
+    uint public constant MINIMUM_DELAY = 1 days;
+    uint public constant MAXIMUM_DELAY = 30 days;
+    bool private _initialized;
+    address public faasPool;
+    address public admin;
+    address public pendingAdmin;
+    uint public delay;
+    bool public admin_initialized;
+    mapping(bytes32 => bool) public queuedTransactions;
+
+    constructor() public {
+        admin_initialized = false;
+        _initialized = false;
     }
+
+    function initialized(address admin_, uint delay_, address _faasPool) public {
+        require(_initialized == false, "Timelock::constructor: Delay must exceed minimum delay.");
+        require(delay_ >= MINIMUM_DELAY, "Timelock::constructor: Delay must exceed minimum delay.");
+        require(delay_ <= MAXIMUM_DELAY, "Timelock::constructor: Delay must not exceed maximum delay.");
+        admin = admin_;
+        faasPool = _faasPool;
+        delay = delay_;
+        _initialized = true;
+    }
+
+    // XXX: function() external payable { }
+    receive() external payable {}
+
+    function setDelay(uint delay_) public {
+        require(msg.sender == address(this), "Timelock::setDelay: Call must come from Timelock.");
+        require(delay_ >= MINIMUM_DELAY, "Timelock::setDelay: Delay must exceed minimum delay.");
+        require(delay_ <= MAXIMUM_DELAY, "Timelock::setDelay: Delay must not exceed maximum delay.");
+        delay = delay_;
+
+        emit NewDelay(delay);
+    }
+
+    function acceptAdmin() public {
+        require(msg.sender == pendingAdmin, "Timelock::acceptAdmin: Call must come from pendingAdmin.");
+        admin = msg.sender;
+        pendingAdmin = address(0);
+
+        emit NewAdmin(admin);
+    }
+
+    function setPendingAdmin(address pendingAdmin_) public {
+        // allows one time setting of admin for deployment purposes
+        if (admin_initialized) {
+            require(msg.sender == address(this), "Timelock::setPendingAdmin: Call must come from Timelock.");
+        } else {
+            require(msg.sender == admin, "Timelock::setPendingAdmin: First call must come from admin.");
+            admin_initialized = true;
+        }
+        pendingAdmin = pendingAdmin_;
+
+        emit NewPendingAdmin(pendingAdmin);
+    }
+
+    function queueTransaction(address target, uint value, string memory signature, bytes memory data, uint eta) public returns (bytes32) {
+        require(msg.sender == admin, "Timelock::queueTransaction: Call must come from admin.");
+        require(eta >= getBlockTimestamp().add(delay), "Timelock::queueTransaction: Estimated execution block must satisfy delay.");
+
+        bytes32 txHash = keccak256(abi.encode(target, value, signature, data, eta));
+        queuedTransactions[txHash] = true;
+
+        emit QueueTransaction(txHash, target, value, signature, data, eta);
+        return txHash;
+    }
+
+    function cancelTransaction(address target, uint value, string memory signature, bytes memory data, uint eta) public {
+        require(msg.sender == admin, "Timelock::cancelTransaction: Call must come from admin.");
+
+        bytes32 txHash = keccak256(abi.encode(target, value, signature, data, eta));
+        queuedTransactions[txHash] = false;
+
+        emit CancelTransaction(txHash, target, value, signature, data, eta);
+    }
+
+    function executeTransaction(address target, uint value, string memory signature, bytes memory data, uint eta) public payable returns (bytes memory) {
+        require(msg.sender == admin, "Timelock::executeTransaction: Call must come from admin.");
+
+        bytes32 txHash = keccak256(abi.encode(target, value, signature, data, eta));
+        require(queuedTransactions[txHash], "Timelock::executeTransaction: Transaction hasn't been queued.");
+        require(getBlockTimestamp() >= eta, "Timelock::executeTransaction: Transaction hasn't surpassed time lock.");
+        require(getBlockTimestamp() <= eta.add(GRACE_PERIOD), "Timelock::executeTransaction: Transaction is stale.");
+
+        queuedTransactions[txHash] = false;
+
+        bytes memory callData;
+
+        if (bytes(signature).length == 0) {
+            callData = data;
+        } else {
+            callData = abi.encodePacked(bytes4(keccak256(bytes(signature))), data);
+        }
+
+        // solium-disable-next-line security/no-call-value
+        (bool success, bytes memory returnData) = target.call{value : value}(callData);
+        require(success, "Timelock::executeTransaction: Transaction execution reverted.");
+
+        emit ExecuteTransaction(txHash, target, value, signature, data, eta);
+
+        return returnData;
+    }
+
+    function getBlockTimestamp() internal view returns (uint) {
+        return block.timestamp;
+    }
+
 
     function balance(IERC20 _token) public view returns (uint256) {
         return _token.balanceOf(address(this));
@@ -24,4 +138,19 @@ contract FaaSRewardFund {
         uint256 _tokenBal = balance(_token);
         _token.safeTransfer(_to, _tokenBal > _value ? _value : _tokenBal);
     }
+
+    /**
+     * This function allows governance to take unsupported tokens out of the contract. This is in an effort to make someone whole, should they seriously mess up.
+     * There is no guarantee governance will vote to return these. It also allows for removal of airdropped tokens.
+     */
+    function governanceRecoverUnsupported(IERC20 _token, uint _amount, address _to) external {
+        require(msg.sender == address(this), "!timelock");
+        if ((address(_token) == address(0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE))) {
+            (bool xfer,) = _to.call{value : _amount}("");
+            require(xfer, "ERR_ETH_FAILED");
+        } else {
+            _token.safeTransfer(_to, _amount);
+        }
+    }
+
 }

@@ -1,23 +1,23 @@
 // SPDX-License-Identifier: MIT
 
 pragma solidity 0.6.12;
+
 pragma experimental ABIEncoderV2;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
 import "@openzeppelin/contracts/math/SafeMath.sol";
 import "@openzeppelin/contracts/utils/Address.sol";
-import "./interfaces/IBPool.sol";
 import "./interfaces/IFreeFromUpTo.sol";
+import "./interfaces/IWETH.sol";
+import "./interfaces/IBPool.sol";
 import "./interfaces/IBFactory.sol";
 import "./interfaces/IValueLiquidRegistry.sol";
-import "./interfaces/IWETH.sol";
 
-contract ExchangeProxy {
+contract ValueLiquidRouter {
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
     using Address for address;
-
     IFreeFromUpTo public constant chi = IFreeFromUpTo(0x0000000000004946c0e9F43F4Dee607b0eF1fA1c);
 
     modifier discountCHI(uint8 flag) {
@@ -57,8 +57,8 @@ contract ExchangeProxy {
 
     address public governance;
 
-    constructor(address _weth) public {
-        weth = IWETH(_weth);
+    constructor(IWETH _weth) public {
+        weth = _weth;
         governance = tx.origin;
     }
 
@@ -67,33 +67,141 @@ contract ExchangeProxy {
         governance = _governance;
     }
 
-    function setRegistry(address _registry) external {
+    function setRegistry(IValueLiquidRegistry _registry) external {
         require(msg.sender == governance, "!governance");
-        registry = IValueLiquidRegistry(_registry);
+        registry = _registry;
     }
+
+//    function create(
+//        IBFactory factory,
+//        address[] calldata tokens,
+//        uint[] calldata balances,
+//        uint[] calldata denorms,
+//        uint swapFee,
+//        bool finalize
+//    ) payable external returns (IBPool pool) {
+//        require(tokens.length == balances.length, "ERR_LENGTH_MISMATCH");
+//        require(tokens.length == denorms.length, "ERR_LENGTH_MISMATCH");
+//        pool = factory.newBPool();
+//        pool.setSwapFee(swapFee);
+//        for (uint i = 0; i < tokens.length; i++) {
+//            if (transferFromAllAndApprove(tokens[i], balances[i], address(pool))) {
+//                pool.bind(address(weth), balances[i], denorms[i]);
+//            } else {
+//                pool.bind(tokens[i], balances[i], denorms[i]);
+//            }
+//        }
+//        if (finalize) {
+//            pool.finalize();
+//            IERC20(pool).safeTransfer(msg.sender, pool.balanceOf(address(this)));
+//        } else {
+//            pool.setPublicSwap(true);
+//        }
+//    }
+
+    function joinPool(
+        address pool,
+        uint poolAmountOut,
+        uint[] calldata maxAmountsIn
+    ) payable external {
+        address[] memory tokens = IBPool(pool).getFinalTokens();
+        require(maxAmountsIn.length == tokens.length, "ERR_LENGTH_MISMATCH");
+        bool containsETH = false;
+        for (uint i = 0; i < tokens.length; i++) {
+            if (transferFromAllAndApprove(tokens[i], maxAmountsIn[i], pool)) {
+                containsETH = true;
+            }
+        }
+        require(msg.value == 0 || containsETH, "!invalid payable");
+        IBPool(pool).joinPool(poolAmountOut, maxAmountsIn);
+        for (uint i = 0; i < tokens.length; i++) {
+            transferAll(tokens[i], getBalance(tokens[i]));
+        }
+        transferAll(pool, poolAmountOut);
+    }
+
+
+    function exitPool(address pool, uint poolAmountIn, uint[] calldata minAmountsOut) external {
+        IERC20(pool).safeTransferFrom(msg.sender, address(this), poolAmountIn);
+        IERC20(pool).safeApprove(pool, poolAmountIn);
+        IBPool(pool).exitPool(poolAmountIn, minAmountsOut);
+        address[] memory tokens = IBPool(pool).getFinalTokens();
+        for (uint i = 0; i < tokens.length; i++) {
+            address token = tokens[i];
+            if (token == address(weth)) {
+                transferAll(ETH_ADDRESS, getBalance(tokens[i]));
+            } else {
+                transferAll(tokens[i], getBalance(tokens[i]));
+            }
+        }
+    }
+    //    function exitswapPoolAmountIn(address pool, address tokenOut, uint poolAmountIn, uint minAmountOut) external returns (uint tokenAmountOut) {
+    //        IERC20(pool).safeTransferFrom(msg.sender, address(this), poolAmountIn);
+    //        IERC20(pool).safeApprove(pool, poolAmountIn);
+    //        tokenAmountOut = IBPool(pool).exitswapPoolAmountIn(tokenOut, poolAmountIn, minAmountOut);
+    //        IERC20 token = IERC20(tokenOut);
+    //        token.safeTransfer(msg.sender, token.balanceOf(address(this)));
+    //        return tokenAmountOut;
+    //    }
+
+    //    function joinswapExternAmountIn(
+    //        address pool,
+    //        address tokenIn,
+    //        uint tokenAmountIn,
+    //        uint minPoolAmountOut
+    //    ) external returns (uint poolAmountOut) {
+    //        IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), tokenAmountIn);
+    //        IERC20(tokenIn).safeApprove(pool, tokenAmountIn);
+    //        poolAmountOut = IBPool(pool).joinswapExternAmountIn(tokenIn, tokenAmountIn, minPoolAmountOut);
+    //        IERC20(pool).safeTransfer(msg.sender, poolAmountOut);
+    //        if (IERC20(tokenIn).balanceOf(address(this)) > 0) {
+    //            IERC20(tokenIn).safeTransfer(msg.sender, IERC20(tokenIn).balanceOf(address(this)));
+    //        }
+    //        return poolAmountOut;
+    //    }
+
+
+    //    function joinswapPoolAmountOut(
+    //        address pool,
+    //        address tokenIn, uint poolAmountOut, uint maxAmountIn
+    //    ) external returns (uint tokenAmountIn) {
+    //        IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), maxAmountIn);
+    //        IERC20(tokenIn).safeApprove(pool, maxAmountIn);
+    //        tokenAmountIn = IBPool(pool).joinswapPoolAmountOut(tokenIn, poolAmountOut, maxAmountIn);
+    //        IERC20(pool).safeTransfer(msg.sender, poolAmountOut);
+    //        if (IERC20(tokenIn).balanceOf(address(this)) > 0) {
+    //            IERC20(tokenIn).safeTransfer(msg.sender, IERC20(tokenIn).balanceOf(address(this)));
+    //        }
+    //        return tokenAmountIn;
+    //    }
+    //
+    //    function exitswapExternAmountOut(address pool, address tokenOut, uint tokenAmountOut,
+    //        uint maxPoolAmountIn) external returns (uint poolAmountIn) {
+    //        IERC20(pool).safeTransferFrom(msg.sender, address(this), maxPoolAmountIn);
+    //        IERC20(pool).safeApprove(pool, maxPoolAmountIn);
+    //        poolAmountIn = IBPool(pool).exitswapExternAmountOut(tokenOut, tokenAmountOut, maxPoolAmountIn);
+    //        IERC20(tokenOut).safeTransfer(msg.sender, tokenAmountOut);
+    //        if (IERC20(pool).balanceOf(address(this)) > 0) {
+    //            IERC20(pool).safeTransfer(msg.sender, IERC20(pool).balanceOf(address(this)));
+    //        }
+    //    }
+
 
     function batchSwapExactIn(
         Swap[] memory swaps,
-        IERC20 tokenIn,
-        IERC20 tokenOut,
+        address tokenIn,
+        address tokenOut,
         uint totalAmountIn,
         uint minTotalAmountOut,
         uint8 flag
     )
-    public payable discountCHI(flag)
-    returns (uint totalAmountOut)
-    {
+    public payable discountCHI(flag) returns (uint totalAmountOut) {
         transferFromAll(tokenIn, totalAmountIn);
 
         for (uint i = 0; i < swaps.length; i++) {
             Swap memory swap = swaps[i];
-            IERC20 SwapTokenIn = IERC20(swap.tokenIn);
             IBPool pool = IBPool(swap.pool);
-
-            if (SwapTokenIn.allowance(address(this), swap.pool) > 0) {
-                SwapTokenIn.safeApprove(swap.pool, 0);
-            }
-            SwapTokenIn.safeApprove(swap.pool, swap.swapAmount);
+            IERC20(swap.tokenIn).safeApprove(swap.pool, swap.swapAmount);
 
             (uint tokenAmountOut,) = pool.swapExactAmountIn(
                 swap.tokenIn,
@@ -109,12 +217,13 @@ contract ExchangeProxy {
 
         transferAll(tokenOut, totalAmountOut);
         transferAll(tokenIn, getBalance(tokenIn));
+        return totalAmountOut;
     }
 
     function batchSwapExactOut(
         Swap[] memory swaps,
-        IERC20 tokenIn,
-        IERC20 tokenOut,
+        address tokenIn,
+        address tokenOut,
         uint maxTotalAmountIn,
         uint8 flag
     )
@@ -122,18 +231,10 @@ contract ExchangeProxy {
     returns (uint totalAmountIn)
     {
         transferFromAll(tokenIn, maxTotalAmountIn);
-
         for (uint i = 0; i < swaps.length; i++) {
             Swap memory swap = swaps[i];
-            IERC20 SwapTokenIn = IERC20(swap.tokenIn);
-            IBPool pool = IBPool(swap.pool);
-
-            if (SwapTokenIn.allowance(address(this), swap.pool) > 0) {
-                SwapTokenIn.safeApprove(swap.pool, 0);
-            }
-            SwapTokenIn.safeApprove(swap.pool, swap.limitReturnAmount);
-
-            (uint tokenAmountIn,) = pool.swapExactAmountOut(
+            IERC20(swap.tokenIn).safeApprove(swap.pool, swap.limitReturnAmount);
+            (uint tokenAmountIn,) = IBPool(swap.pool).swapExactAmountOut(
                 swap.tokenIn,
                 swap.limitReturnAmount,
                 swap.tokenOut,
@@ -146,13 +247,14 @@ contract ExchangeProxy {
 
         transferAll(tokenOut, getBalance(tokenOut));
         transferAll(tokenIn, getBalance(tokenIn));
+        return totalAmountIn;
 
     }
 
     function multihopBatchSwapExactIn(
         Swap[][] memory swapSequences,
-        IERC20 tokenIn,
-        IERC20 tokenOut,
+        address tokenIn,
+        address tokenOut,
         uint totalAmountIn,
         uint minTotalAmountOut,
         uint8 flag
@@ -175,9 +277,6 @@ contract ExchangeProxy {
                 }
 
                 IBPool pool = IBPool(swap.pool);
-                if (SwapTokenIn.allowance(address(this), swap.pool) > 0) {
-                    SwapTokenIn.safeApprove(swap.pool, 0);
-                }
                 SwapTokenIn.safeApprove(swap.pool, swap.swapAmount);
                 (tokenAmountOut,) = pool.swapExactAmountIn(
                     swap.tokenIn,
@@ -200,8 +299,8 @@ contract ExchangeProxy {
 
     function multihopBatchSwapExactOut(
         Swap[][] memory swapSequences,
-        IERC20 tokenIn,
-        IERC20 tokenOut,
+        address tokenIn,
+        address tokenOut,
         uint maxTotalAmountIn,
         uint8 flag
     )
@@ -219,11 +318,7 @@ contract ExchangeProxy {
                 IERC20 SwapTokenIn = IERC20(swap.tokenIn);
 
                 IBPool pool = IBPool(swap.pool);
-                if (SwapTokenIn.allowance(address(this), swap.pool) > 0) {
-                    SwapTokenIn.safeApprove(swap.pool, 0);
-                }
                 SwapTokenIn.safeApprove(swap.pool, swap.limitReturnAmount);
-
                 (tokenAmountInFirstSwap,) = pool.swapExactAmountOut(
                     swap.tokenIn,
                     swap.limitReturnAmount,
@@ -289,8 +384,8 @@ contract ExchangeProxy {
     }
 
     function smartSwapExactIn(
-        IERC20 tokenIn,
-        IERC20 tokenOut,
+        address tokenIn,
+        address tokenOut,
         uint totalAmountIn,
         uint minTotalAmountOut,
         uint nPools,
@@ -312,8 +407,8 @@ contract ExchangeProxy {
     }
 
     function smartSwapExactOut(
-        IERC20 tokenIn,
-        IERC20 tokenOut,
+        address tokenIn,
+        address tokenOut,
         uint totalAmountOut,
         uint maxTotalAmountIn,
         uint nPools,
@@ -509,9 +604,7 @@ contract ExchangeProxy {
     function calcTotalOutExactOut(
         uint[] memory bestInputAmounts,
         Pool[] memory bestPools
-    )
-    internal pure
-    returns (uint totalOutput)
+    ) internal pure returns (uint totalOutput)
     {
         totalOutput = 0;
         for (uint i = 0; i < bestInputAmounts.length; i++) {
@@ -529,39 +622,53 @@ contract ExchangeProxy {
         return totalOutput;
     }
 
-    function transferFromAll(IERC20 token, uint amount) internal returns (bool) {
+
+    function transferFromAllAndApprove(address token, uint amount, address spender) internal returns (bool containsETH) {
         if (isETH(token)) {
-            weth.deposit{value : msg.value}();
+            require(amount == msg.value, "!invalid amount");
+            weth.deposit{value : amount}();
+            IERC20(address(weth)).safeApprove(spender, amount);
+            containsETH = true;
         } else {
-            token.safeTransferFrom(msg.sender, address(this), amount);
+            IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+            IERC20(token).safeApprove(spender, amount);
         }
-        return true;
+        return containsETH;
     }
 
-    function getBalance(IERC20 token) internal view returns (uint) {
+    function transferFromAll(address token, uint amount) internal returns (bool containsETH) {
+        if (isETH(token)) {
+            weth.deposit{value : msg.value}();
+            containsETH = true;
+        } else {
+            IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        }
+        return containsETH;
+    }
+
+    function getBalance(address token) internal view returns (uint) {
         if (isETH(token)) {
             return weth.balanceOf(address(this));
         } else {
-            return token.balanceOf(address(this));
+            return IERC20(token).balanceOf(address(this));
         }
     }
 
-    function transferAll(IERC20 token, uint amount) internal returns (bool) {
+    function transferAll(address token, uint amount) internal returns (bool) {
         if (amount == 0) {
             return true;
         }
-
         if (isETH(token)) {
             weth.withdraw(amount);
             (bool xfer,) = msg.sender.call{value : amount}("");
             require(xfer, "ERR_ETH_FAILED");
         } else {
-            token.safeTransfer(msg.sender, amount);
+            IERC20(token).safeTransfer(msg.sender, amount);
         }
         return true;
     }
 
-    function isETH(IERC20 token) internal pure returns (bool) {
+    function isETH(address token) internal pure returns (bool) {
         return (address(token) == ETH_ADDRESS);
     }
 
@@ -571,128 +678,15 @@ contract ExchangeProxy {
      * There is no guarantee governance will vote to return these.
      * It also allows for removal of airdropped tokens.
      */
-    function governanceRecoverUnsupported(IERC20 _token, uint _amount, address _to) external {
+    function governanceRecoverUnsupported(address _token, uint _amount, address _to) external {
         require(msg.sender == governance, "!governance");
         if (isETH(_token)) {
             (bool xfer,) = _to.call{value : _amount}("");
             require(xfer, "ERR_ETH_FAILED");
         } else {
-            _token.safeTransfer(_to, _amount);
+            IERC20(_token).safeTransfer(_to, _amount);
         }
     }
 
     receive() external payable {}
-
-    function create(
-        IBFactory factory,
-        address[] memory tokens,
-        uint[] calldata balances,
-        uint[] calldata denorms,
-        uint swapFee,
-        uint initPoolSupply,
-        uint8 flag
-    ) payable external discountCHI(flag) returns (IBPool pool) {
-        require(tokens.length == balances.length, "ERR_LENGTH_MISMATCH");
-        require(tokens.length == denorms.length, "ERR_LENGTH_MISMATCH");
-        pool = factory.newBPool();
-        bool containsETH = false;
-        for (uint i = 0; i < tokens.length; i++) {
-            if (transferFromAllTo(tokens[i], balances[i], address(pool))) {
-                containsETH = true;
-                tokens[i] = address(weth);
-            }
-        }
-        require(msg.value == 0 || containsETH, "!invalid payable");
-        pool.finalize(swapFee, initPoolSupply, tokens, denorms);
-        pool.setExchangeProxy(address(this));
-        pool.setController(msg.sender);
-        uint lpAmount = pool.balanceOf(address(this));
-        if (lpAmount > 0) {
-            IERC20(pool).safeTransfer(msg.sender, lpAmount);
-        }
-    }
-
-    function joinPool(
-        IBPool pool,
-        uint poolAmountOut,
-        uint[] calldata maxAmountsIn,
-        uint8 flag
-    ) payable external discountCHI(flag) {
-        address[] memory tokens = pool.getFinalTokens();
-        require(maxAmountsIn.length == tokens.length, "ERR_LENGTH_MISMATCH");
-        bool containsETH = false;
-        for (uint i = 0; i < tokens.length; i++) {
-            if (msg.value > 0 && tokens[i] == address(weth)) {
-                transferFromAllAndApprove(ETH_ADDRESS, maxAmountsIn[i], address(pool));
-                containsETH = true;
-            } else {
-                transferFromAllAndApprove(tokens[i], maxAmountsIn[i], address(pool));
-            }
-        }
-        require(msg.value == 0 || containsETH, "!invalid payable");
-        if (pool.version() == 1001) {
-            pool.joinPool(poolAmountOut, maxAmountsIn);
-        } else {
-            pool.joinPoolFor(msg.sender, poolAmountOut, maxAmountsIn);
-        }
-        for (uint i = 0; i < tokens.length; i++) {
-            if (containsETH && tokens[i] == address(weth)) {
-                transferAll(IERC20(ETH_ADDRESS), getBalance(IERC20(ETH_ADDRESS)));
-            } else {
-                transferAll(IERC20(tokens[i]), getBalance(IERC20(tokens[i])));
-            }
-        }
-        uint lpAmount = pool.balanceOf(address(this));
-        transferAll(pool, lpAmount);
-    }
-
-    function joinswapExternAmountIn(
-        IBPool pool,
-        address tokenIn,
-        uint tokenAmountIn,
-        uint minPoolAmountOut,
-        uint8 flag
-    ) payable external discountCHI(flag) {
-        bool containsETH = false;
-        if (transferFromAllAndApprove(tokenIn, tokenAmountIn, address(pool))) {
-            containsETH = true;
-        }
-        require(msg.value == 0 || containsETH, "!invalid payable");
-        if (containsETH) {
-            uint poolAmountOut = pool.joinswapExternAmountIn(address(weth), tokenAmountIn, minPoolAmountOut);
-            IERC20(pool).safeTransfer(msg.sender, poolAmountOut);
-        } else {
-            uint poolAmountOut = pool.joinswapExternAmountIn(tokenIn, tokenAmountIn, minPoolAmountOut);
-            IERC20(pool).safeTransfer(msg.sender, poolAmountOut);
-        }
-    }
-    function transferFromAllTo(address token, uint amount, address to) internal returns (bool containsETH) {
-        if (isETH(IERC20(token))) {
-            require(amount == msg.value, "!invalid amount");
-            weth.deposit{value : amount}();
-            weth.transfer(to,amount);
-            containsETH = true;
-        } else {
-            IERC20(token).safeTransferFrom(msg.sender, to, amount);
-        }
-        return containsETH;
-    }
-    function transferFromAllAndApprove(address token, uint amount, address spender) internal returns (bool containsETH) {
-        if (isETH(IERC20(token))) {
-            require(amount == msg.value, "!invalid amount");
-            weth.deposit{value : amount}();
-            if (weth.allowance(address(this), spender) > 0) {
-                IERC20(address(weth)).safeApprove(address(spender), 0);
-            }
-            IERC20(address(weth)).safeApprove(spender, amount);
-            containsETH = true;
-        } else {
-            IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
-            if (IERC20(token).allowance(address(this), spender) > 0) {
-                IERC20(token).safeApprove(spender, 0);
-            }
-            IERC20(token).safeApprove(spender, amount);
-        }
-        return containsETH;
-    }
 }

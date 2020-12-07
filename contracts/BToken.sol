@@ -91,7 +91,7 @@ contract BToken is BTokenBase, IERC20 {
         return _allowance[src][dst];
     }
 
-    function balanceOf(address whom) external override view returns (uint) {
+    function balanceOf(address whom) public override view returns (uint) {
         return _balance[whom];
     }
 

@@ -20,11 +20,11 @@ library BConst {
     uint public constant MAX_BOUND_TOKENS         = 8;
 
     uint public constant DEFAULT_FEE              = BONE * 3 / 1000; // 0.3%
-    uint public constant MIN_FEE                  = BONE / 10**6;
-    uint public constant MAX_FEE                  = BONE / 10;
+    uint public constant MIN_FEE                  = BONE / 1000; // 0.1%
+    uint public constant MAX_FEE                  = BONE / 10; // 10%
 
-    uint public constant DEFAULT_COLLECTED_FEE    = BONE / 2000; // 0.05%
-    uint public constant MAX_COLLECTED_FEE        = BONE / 200; // 0.5%
+    uint public constant DEFAULT_COLLECTED_FEE    = BONE * 33 / 10000; // 0.33%
+    uint public constant MAX_COLLECTED_FEE        = BONE * 334 / 10000; // 3.34%
 
     uint public constant DEFAULT_EXIT_FEE         = 0;
     uint public constant MAX_EXIT_FEE             = BONE / 1000; // 0.1%
