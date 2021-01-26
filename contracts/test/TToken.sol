@@ -11,7 +11,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-pragma solidity 0.6.12;
+pragma solidity 0.7.6;
 
 // Test Token
 
@@ -106,7 +106,7 @@ contract TToken {
         return true;
     }
 
-    function mint(address dst, uint256 amt) public _onlyOwner_ returns (bool) {
+    function mint(address dst, uint256 amt) public returns (bool) {
         _mint(dst, amt);
         return true;
     }

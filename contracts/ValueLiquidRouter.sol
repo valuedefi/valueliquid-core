@@ -1,300 +1,436 @@
-// SPDX-License-Identifier: MIT
+pragma solidity >=0.7.6;
+pragma abicoder v2;
 
-pragma solidity 0.6.12;
+import './interfaces/IValueLiquidFactory.sol';
+import './interfaces/IValueLiquidFormula.sol';
+import './interfaces/IValueLiquidPair.sol';
+import './interfaces/IStakePool.sol';
+import './libraries/TransferHelper.sol';
 
-pragma experimental ABIEncoderV2;
-
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
-import "@openzeppelin/contracts/math/SafeMath.sol";
-import "@openzeppelin/contracts/utils/Address.sol";
+import './interfaces/IValueLiquidRouter.sol';
+import './libraries/SafeMath.sol';
+import './interfaces/IWETH.sol';
+import './interfaces/IBPool.sol';
 import "./interfaces/IFreeFromUpTo.sol";
-import "./interfaces/IWETH.sol";
-import "./interfaces/IBPool.sol";
-import "./interfaces/IBFactory.sol";
-import "./interfaces/IValueLiquidRegistry.sol";
+import './interfaces/IStakePoolController.sol';
+contract ValueLiquidRouter is IValueLiquidRouter {
+    using SafeMath for uint;
+    address public immutable override factory;
+    address public immutable override controller;
+    address public immutable override formula;
+    address public immutable override WETH;
+    address private constant ETH_ADDRESS = address(0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE);
 
-contract ValueLiquidRouter {
-    using SafeMath for uint256;
-    using SafeERC20 for IERC20;
-    using Address for address;
     IFreeFromUpTo public constant chi = IFreeFromUpTo(0x0000000000004946c0e9F43F4Dee607b0eF1fA1c);
-
+    modifier ensure(uint256 deadline) {
+        require(deadline >= block.timestamp, 'Router: EXPIRED');
+        _;
+    }
     modifier discountCHI(uint8 flag) {
-        if ((flag & 0x1) == 0) {
-            _;
-        } else {
-            uint256 gasStart = gasleft();
-            _;
+        uint256 gasStart = gasleft();
+        _;
+        if ((flag & 0x1) == 1) {
             uint256 gasSpent = 21000 + gasStart - gasleft() + 16 * msg.data.length;
             chi.freeFromUpTo(msg.sender, (gasSpent + 14154) / 41130);
         }
     }
-
-    struct Pool {
-        address pool;
-        uint tokenBalanceIn;
-        uint tokenWeightIn;
-        uint tokenBalanceOut;
-        uint tokenWeightOut;
-        uint swapFee;
-        uint effectiveLiquidity;
+    constructor(address _factory, address _controller, address _WETH) public {
+        factory = _factory;
+        controller = _controller;
+        formula = IValueLiquidFactory(_factory).formula();
+        WETH = _WETH;
     }
 
-    struct Swap {
-        address pool;
-        address tokenIn;
-        address tokenOut;
-        uint swapAmount; // tokenInAmount / tokenOutAmount
-        uint limitReturnAmount; // minAmountOut / maxAmountIn
-        uint maxPrice;
+    receive() external payable {
+        assert(msg.sender == WETH);
+        // only accept ETH via fallback from the WETH contract
     }
 
-    IWETH weth;
-    IValueLiquidRegistry registry;
-    address private constant ETH_ADDRESS = address(0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE);
-    uint private constant BONE = 10 ** 18;
-
-    address public governance;
-
-    constructor(IWETH _weth) public {
-        weth = _weth;
-        governance = tx.origin;
-    }
-
-    function setGovernance(address _governance) external {
-        require(msg.sender == governance, "!governance");
-        governance = _governance;
-    }
-
-    function setRegistry(IValueLiquidRegistry _registry) external {
-        require(msg.sender == governance, "!governance");
-        registry = _registry;
-    }
-
-//    function create(
-//        IBFactory factory,
-//        address[] calldata tokens,
-//        uint[] calldata balances,
-//        uint[] calldata denorms,
-//        uint swapFee,
-//        bool finalize
-//    ) payable external returns (IBPool pool) {
-//        require(tokens.length == balances.length, "ERR_LENGTH_MISMATCH");
-//        require(tokens.length == denorms.length, "ERR_LENGTH_MISMATCH");
-//        pool = factory.newBPool();
-//        pool.setSwapFee(swapFee);
-//        for (uint i = 0; i < tokens.length; i++) {
-//            if (transferFromAllAndApprove(tokens[i], balances[i], address(pool))) {
-//                pool.bind(address(weth), balances[i], denorms[i]);
-//            } else {
-//                pool.bind(tokens[i], balances[i], denorms[i]);
-//            }
-//        }
-//        if (finalize) {
-//            pool.finalize();
-//            IERC20(pool).safeTransfer(msg.sender, pool.balanceOf(address(this)));
-//        } else {
-//            pool.setPublicSwap(true);
-//        }
-//    }
-
-    function joinPool(
-        address pool,
-        uint poolAmountOut,
-        uint[] calldata maxAmountsIn
-    ) payable external {
-        address[] memory tokens = IBPool(pool).getFinalTokens();
-        require(maxAmountsIn.length == tokens.length, "ERR_LENGTH_MISMATCH");
-        bool containsETH = false;
-        for (uint i = 0; i < tokens.length; i++) {
-            if (transferFromAllAndApprove(tokens[i], maxAmountsIn[i], pool)) {
-                containsETH = true;
-            }
-        }
-        require(msg.value == 0 || containsETH, "!invalid payable");
-        IBPool(pool).joinPool(poolAmountOut, maxAmountsIn);
-        for (uint i = 0; i < tokens.length; i++) {
-            transferAll(tokens[i], getBalance(tokens[i]));
-        }
-        transferAll(pool, poolAmountOut);
-    }
-
-
-    function exitPool(address pool, uint poolAmountIn, uint[] calldata minAmountsOut) external {
-        IERC20(pool).safeTransferFrom(msg.sender, address(this), poolAmountIn);
-        IERC20(pool).safeApprove(pool, poolAmountIn);
-        IBPool(pool).exitPool(poolAmountIn, minAmountsOut);
-        address[] memory tokens = IBPool(pool).getFinalTokens();
-        for (uint i = 0; i < tokens.length; i++) {
-            address token = tokens[i];
-            if (token == address(weth)) {
-                transferAll(ETH_ADDRESS, getBalance(tokens[i]));
+    // **** ADD LIQUIDITY ****
+    function _addLiquidity(
+        address pair,
+        address tokenA,
+        address tokenB,
+        uint amountADesired,
+        uint amountBDesired,
+        uint amountAMin,
+        uint amountBMin
+    ) internal virtual returns (uint amountA, uint amountB) {
+        require(IValueLiquidFactory(factory).isPair(pair), "Router: Invalid pair");
+        (uint reserveA, uint reserveB) = IValueLiquidFormula(formula).getReserves(pair, tokenA, tokenB);
+        if (reserveA == 0 && reserveB == 0) {
+            (amountA, amountB) = (amountADesired, amountBDesired);
+        } else {
+            uint amountBOptimal = IValueLiquidFormula(formula).quote(amountADesired, reserveA, reserveB);
+            if (amountBOptimal <= amountBDesired) {
+                require(amountBOptimal >= amountBMin, 'Router: INSUFFICIENT_B_AMOUNT');
+                (amountA, amountB) = (amountADesired, amountBOptimal);
             } else {
-                transferAll(tokens[i], getBalance(tokens[i]));
+                uint amountAOptimal = IValueLiquidFormula(formula).quote(amountBDesired, reserveB, reserveA);
+                assert(amountAOptimal <= amountADesired);
+                require(amountAOptimal >= amountAMin, 'Router: INSUFFICIENT_A_AMOUNT');
+                (amountA, amountB) = (amountAOptimal, amountBDesired);
             }
         }
     }
-    //    function exitswapPoolAmountIn(address pool, address tokenOut, uint poolAmountIn, uint minAmountOut) external returns (uint tokenAmountOut) {
-    //        IERC20(pool).safeTransferFrom(msg.sender, address(this), poolAmountIn);
-    //        IERC20(pool).safeApprove(pool, poolAmountIn);
-    //        tokenAmountOut = IBPool(pool).exitswapPoolAmountIn(tokenOut, poolAmountIn, minAmountOut);
-    //        IERC20 token = IERC20(tokenOut);
-    //        token.safeTransfer(msg.sender, token.balanceOf(address(this)));
-    //        return tokenAmountOut;
-    //    }
 
-    //    function joinswapExternAmountIn(
-    //        address pool,
-    //        address tokenIn,
-    //        uint tokenAmountIn,
-    //        uint minPoolAmountOut
-    //    ) external returns (uint poolAmountOut) {
-    //        IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), tokenAmountIn);
-    //        IERC20(tokenIn).safeApprove(pool, tokenAmountIn);
-    //        poolAmountOut = IBPool(pool).joinswapExternAmountIn(tokenIn, tokenAmountIn, minPoolAmountOut);
-    //        IERC20(pool).safeTransfer(msg.sender, poolAmountOut);
-    //        if (IERC20(tokenIn).balanceOf(address(this)) > 0) {
-    //            IERC20(tokenIn).safeTransfer(msg.sender, IERC20(tokenIn).balanceOf(address(this)));
-    //        }
-    //        return poolAmountOut;
-    //    }
-
-
-    //    function joinswapPoolAmountOut(
-    //        address pool,
-    //        address tokenIn, uint poolAmountOut, uint maxAmountIn
-    //    ) external returns (uint tokenAmountIn) {
-    //        IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), maxAmountIn);
-    //        IERC20(tokenIn).safeApprove(pool, maxAmountIn);
-    //        tokenAmountIn = IBPool(pool).joinswapPoolAmountOut(tokenIn, poolAmountOut, maxAmountIn);
-    //        IERC20(pool).safeTransfer(msg.sender, poolAmountOut);
-    //        if (IERC20(tokenIn).balanceOf(address(this)) > 0) {
-    //            IERC20(tokenIn).safeTransfer(msg.sender, IERC20(tokenIn).balanceOf(address(this)));
-    //        }
-    //        return tokenAmountIn;
-    //    }
-    //
-    //    function exitswapExternAmountOut(address pool, address tokenOut, uint tokenAmountOut,
-    //        uint maxPoolAmountIn) external returns (uint poolAmountIn) {
-    //        IERC20(pool).safeTransferFrom(msg.sender, address(this), maxPoolAmountIn);
-    //        IERC20(pool).safeApprove(pool, maxPoolAmountIn);
-    //        poolAmountIn = IBPool(pool).exitswapExternAmountOut(tokenOut, tokenAmountOut, maxPoolAmountIn);
-    //        IERC20(tokenOut).safeTransfer(msg.sender, tokenAmountOut);
-    //        if (IERC20(pool).balanceOf(address(this)) > 0) {
-    //            IERC20(pool).safeTransfer(msg.sender, IERC20(pool).balanceOf(address(this)));
-    //        }
-    //    }
-
-
-    function batchSwapExactIn(
-        Swap[] memory swaps,
-        address tokenIn,
-        address tokenOut,
-        uint totalAmountIn,
-        uint minTotalAmountOut,
-        uint8 flag
-    )
-    public payable discountCHI(flag) returns (uint totalAmountOut) {
-        transferFromAll(tokenIn, totalAmountIn);
-
-        for (uint i = 0; i < swaps.length; i++) {
-            Swap memory swap = swaps[i];
-            IBPool pool = IBPool(swap.pool);
-            IERC20(swap.tokenIn).safeApprove(swap.pool, swap.swapAmount);
-
-            (uint tokenAmountOut,) = pool.swapExactAmountIn(
-                swap.tokenIn,
-                swap.swapAmount,
-                swap.tokenOut,
-                swap.limitReturnAmount,
-                swap.maxPrice
-            );
-            totalAmountOut = tokenAmountOut.add(totalAmountOut);
-        }
-
-        require(totalAmountOut >= minTotalAmountOut, "ERR_LIMIT_OUT");
-
-        transferAll(tokenOut, totalAmountOut);
-        transferAll(tokenIn, getBalance(tokenIn));
-        return totalAmountOut;
+    function _addLiquidityToken(
+        address pair,
+        address tokenA,
+        address tokenB,
+        uint amountADesired,
+        uint amountBDesired,
+        uint amountAMin,
+        uint amountBMin
+    ) internal returns (uint amountA, uint amountB) {
+        (amountA, amountB) = _addLiquidity(pair, tokenA, tokenB, amountADesired, amountBDesired, amountAMin, amountBMin);
+        TransferHelper.safeTransferFrom(tokenA, msg.sender, pair, amountA);
+        TransferHelper.safeTransferFrom(tokenB, msg.sender, pair, amountB);
+    }
+    function createPair( address tokenA, address tokenB,uint amountA,uint amountB, uint32 tokenWeightA, uint32 swapFee, address to, uint8 flag) public virtual discountCHI(flag) override returns (uint liquidity) {
+        address pair = IValueLiquidFactory(factory).createPair(tokenA, tokenB, tokenWeightA, swapFee);
+        _addLiquidityToken(pair, tokenA, tokenB, amountA, amountB, 0, 0);
+        liquidity = IValueLiquidPair(pair).mint(to);
+    }
+    function addLiquidity(
+        address pair,
+        address tokenA,
+        address tokenB,
+        uint amountADesired,
+        uint amountBDesired,
+        uint amountAMin,
+        uint amountBMin,
+        address to,
+        uint deadline
+    ) external virtual override ensure(deadline) returns (uint amountA, uint amountB, uint liquidity) {
+        (amountA,  amountB) = _addLiquidityToken(pair, tokenA, tokenB, amountADesired, amountBDesired, amountAMin, amountBMin);
+        liquidity = IValueLiquidPair(pair).mint(to);
+    }
+    function addStakeLiquidity(
+        address stakePool,
+        address tokenA,
+        address tokenB,
+        uint amountADesired,
+        uint amountBDesired,
+        uint amountAMin,
+        uint amountBMin,
+        uint deadline
+    ) external virtual override ensure(deadline) returns (uint amountA, uint amountB, uint liquidity) {
+        require(IStakePoolController(controller).isStakePool(stakePool), "Router: Invalid stakePool");
+        address pair = IStakePool(stakePool).pair();
+        (amountA, amountB) = _addLiquidityToken(pair, tokenA, tokenB, amountADesired, amountBDesired, amountAMin, amountBMin);
+        liquidity = IValueLiquidPair(pair).mint(stakePool);
+        IStakePool(stakePool).stakeFor(msg.sender);
     }
 
-    function batchSwapExactOut(
-        Swap[] memory swaps,
+    function addStakeLiquidityETH(
+        address stakePool,
+        address token,
+        uint amountTokenDesired,
+        uint amountTokenMin,
+        uint amountETHMin,
+        uint deadline
+    ) external virtual override ensure(deadline) payable returns (uint amountToken, uint amountETH, uint liquidity) {
+        require(IStakePoolController(controller).isStakePool(stakePool), "Router: Invalid stakePool");
+        (amountToken, amountETH, liquidity) = _addLiquidityETH(IStakePool(stakePool).pair(), token, amountTokenDesired, amountTokenMin, amountETHMin, stakePool);
+        IStakePool(stakePool).stakeFor(msg.sender);
+    }
+
+    function _addLiquidityETH(
+        address pair,
+        address token,
+        uint amountTokenDesired,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to
+    ) internal returns (uint amountToken, uint amountETH, uint liquidity) {
+        (amountToken, amountETH) = _addLiquidity(
+            pair,
+            token,
+            WETH,
+            amountTokenDesired,
+            msg.value,
+            amountTokenMin,
+            amountETHMin
+        );
+        TransferHelper.safeTransferFrom(token, msg.sender, pair, amountToken);
+        transferETHTo(amountETH, pair);
+        liquidity = IValueLiquidPair(pair).mint(to);
+        // refund dust eth, if any
+        if (msg.value > amountETH) TransferHelper.safeTransferETH(msg.sender, msg.value - amountETH);
+    }
+    function createPairETH( address token, uint amountToken, uint32 tokenWeight, uint32 swapFee, address to, uint8 flag) public virtual override discountCHI(flag) payable returns (uint liquidity) {
+        address pair = IValueLiquidFactory(factory).createPair(token, WETH, tokenWeight, swapFee);
+        (,,liquidity) = _addLiquidityETH(pair, token, amountToken, 0, 0, to);
+    }
+    function addLiquidityETH(
+        address pair,
+        address token,
+        uint amountTokenDesired,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline
+    ) public virtual override payable ensure(deadline) returns (uint amountToken, uint amountETH, uint liquidity) {
+        (amountToken, amountETH, liquidity) = _addLiquidityETH(pair, token, amountTokenDesired, amountTokenMin, amountETHMin, to);
+    }
+
+    // **** SWAP ****
+    // requires the initial amount to have already been sent to the first pair
+    function _swap(address tokenIn, uint[] memory amounts, address[] memory path, address _to) internal virtual {
+        address input = tokenIn;
+        for (uint i = 0; i < path.length; i++) {
+            IValueLiquidPair pairV2 = IValueLiquidPair(path[i]);
+            address token0 = pairV2.token0();
+            uint amountOut = amounts[i + 1];
+            (uint amount0Out, uint amount1Out, address output) = input == token0 ? (uint(0), amountOut, pairV2.token1()) : (amountOut, uint(0), token0);
+            address to = i < path.length - 1 ? path[i + 1] : _to;
+            pairV2.swap(
+                amount0Out, amount1Out, to, new bytes(0)
+            );
+            input = output;
+        }
+    }
+
+    function swapExactTokensForTokens(
         address tokenIn,
         address tokenOut,
-        uint maxTotalAmountIn,
+        uint amountIn,
+        uint amountOutMin,
+        address[] memory path,
+        address to,
+        uint deadline,
         uint8 flag
-    )
-    public payable discountCHI(flag)
-    returns (uint totalAmountIn)
+    ) public virtual override discountCHI(flag) ensure(deadline) returns (uint[] memory amounts) {
+        amounts = _validateAmountOut(tokenIn, tokenOut, amountIn, amountOutMin, path);
+
+        TransferHelper.safeTransferFrom(
+            tokenIn, msg.sender, path[0], amounts[0]
+        );
+        _swap(tokenIn, amounts, path, to);
+    }
+
+    function swapTokensForExactTokens(
+        address tokenIn,
+        address tokenOut,
+        uint amountOut,
+        uint amountInMax,
+        address[] calldata path,
+        address to,
+        uint deadline,
+        uint8 flag
+    ) external virtual override discountCHI(flag) ensure(deadline) returns (uint[] memory amounts) {
+        amounts = _validateAmountIn(tokenIn, tokenOut, amountOut, amountInMax, path);
+
+        TransferHelper.safeTransferFrom(
+            tokenIn, msg.sender, path[0], amounts[0]
+        );
+        _swap(tokenIn, amounts, path, to);
+    }
+
+    function swapExactETHForTokens(address tokenOut, uint amountOutMin, address[] calldata path, address to, uint deadline, uint8 flag)
+        external
+        virtual
+        override
+        payable
+        discountCHI(flag)
+        ensure(deadline)
+        returns (uint[] memory amounts)
     {
-        transferFromAll(tokenIn, maxTotalAmountIn);
-        for (uint i = 0; i < swaps.length; i++) {
-            Swap memory swap = swaps[i];
-            IERC20(swap.tokenIn).safeApprove(swap.pool, swap.limitReturnAmount);
-            (uint tokenAmountIn,) = IBPool(swap.pool).swapExactAmountOut(
-                swap.tokenIn,
-                swap.limitReturnAmount,
-                swap.tokenOut,
-                swap.swapAmount,
-                swap.maxPrice
-            );
-            totalAmountIn = tokenAmountIn.add(totalAmountIn);
-        }
-        require(totalAmountIn <= maxTotalAmountIn, "ERR_LIMIT_IN");
+        amounts = _validateAmountOut(WETH, tokenOut, msg.value, amountOutMin, path);
 
-        transferAll(tokenOut, getBalance(tokenOut));
-        transferAll(tokenIn, getBalance(tokenIn));
-        return totalAmountIn;
+        transferETHTo(amounts[0], path[0]);
+        _swap(WETH, amounts, path, to);
+    }
+    function swapTokensForExactETH(address tokenIn, uint amountOut, uint amountInMax, address[] calldata path, address to, uint deadline, uint8 flag)
+        external
+        virtual
+        override
+        discountCHI(flag)
+        ensure(deadline)
+        returns (uint[] memory amounts)
+    {
+        amounts = _validateAmountIn(tokenIn, WETH, amountOut, amountInMax, path);
 
+        TransferHelper.safeTransferFrom(
+            tokenIn, msg.sender, path[0], amounts[0]
+        );
+        _swap(tokenIn, amounts, path, address(this));
+        transferAll(ETH_ADDRESS, to, amounts[amounts.length - 1]);
+    }
+    function swapExactTokensForETH(address tokenIn, uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline, uint8 flag)
+        external
+        virtual
+        override
+        discountCHI(flag)
+        ensure(deadline)
+        returns (uint[] memory amounts)
+    {
+        amounts = _validateAmountOut(tokenIn, WETH, amountIn, amountOutMin, path);
+
+        TransferHelper.safeTransferFrom(
+            tokenIn, msg.sender, path[0], amounts[0]
+        );
+        _swap(tokenIn, amounts, path, address(this));
+        transferAll(ETH_ADDRESS, to, amounts[amounts.length - 1]);
+    }
+    function swapETHForExactTokens(address tokenOut, uint amountOut, address[] calldata path, address to, uint deadline, uint8 flag)
+        external
+        virtual
+        override
+        payable
+        discountCHI(flag)
+        ensure(deadline)
+        returns (uint[] memory amounts)
+    {
+        amounts = _validateAmountIn(WETH, tokenOut, amountOut, msg.value, path);
+
+        transferETHTo(amounts[0], path[0]);
+        _swap(WETH, amounts, path, to);
+        // refund dust eth, if any
+        if (msg.value > amounts[0]) TransferHelper.safeTransferETH(msg.sender, msg.value - amounts[0]);
     }
 
+    // **** SWAP (supporting fee-on-transfer tokens) ****
+    // requires the initial amount to have already been sent to the first pair
+    function _swapSupportingFeeOnTransferTokens(address tokenIn, address[] memory path, address _to) internal virtual {
+        address input = tokenIn;
+        for (uint i; i < path.length; i++) {
+            IValueLiquidPair pair = IValueLiquidPair(path[i]);
+
+            uint amountInput;
+            uint amountOutput;
+            address currentOutput;
+            {
+                (address output, uint reserveInput, uint reserveOutput, uint32 tokenWeightInput, uint32 tokenWeightOutput, uint32 swapFee) = IValueLiquidFormula(formula).getFactoryReserveAndWeights(factory, address(pair), input);
+                amountInput = IERC20(input).balanceOf(address(pair)).sub(reserveInput);
+                amountOutput = IValueLiquidFormula(formula).getAmountOut(amountInput, reserveInput, reserveOutput, tokenWeightInput, tokenWeightOutput, swapFee);
+                currentOutput = output;
+            }
+            (uint amount0Out, uint amount1Out) = input == pair.token0() ? (uint(0), amountOutput) : (amountOutput, uint(0));
+            address to = i < path.length - 1 ? path[i + 1] : _to;
+            pair.swap(amount0Out, amount1Out, to, new bytes(0));
+            input = currentOutput;
+        }
+    }
+    function swapExactTokensForTokensSupportingFeeOnTransferTokens(
+        address tokenIn,
+        address tokenOut,
+        uint amountIn,
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline, uint8 flag
+    ) external virtual override discountCHI(flag) ensure(deadline) {
+        TransferHelper.safeTransferFrom(
+            tokenIn, msg.sender, path[0], amountIn
+        );
+        uint balanceBefore = IERC20(tokenOut).balanceOf(to);
+        _swapSupportingFeeOnTransferTokens(tokenIn, path, to);
+        require(
+            IERC20(tokenOut).balanceOf(to).sub(balanceBefore) >= amountOutMin,
+            'Router: INSUFFICIENT_OUTPUT_AMOUNT'
+        );
+    }
+    function swapExactETHForTokensSupportingFeeOnTransferTokens(
+        address tokenOut,
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline,
+        uint8 flag
+    )
+        external
+        virtual
+        override
+        payable
+        discountCHI(flag)
+        ensure(deadline)
+    {
+//            require(path[0] == WETH, 'Router: INVALID_PATH');
+        uint amountIn = msg.value;
+        transferETHTo(amountIn, path[0]);
+        uint balanceBefore = IERC20(tokenOut).balanceOf(to);
+        _swapSupportingFeeOnTransferTokens(WETH, path, to);
+        require(
+            IERC20(tokenOut).balanceOf(to).sub(balanceBefore) >= amountOutMin,
+            'Router: INSUFFICIENT_OUTPUT_AMOUNT'
+        );
+    }
+    function swapExactTokensForETHSupportingFeeOnTransferTokens(
+        address tokenIn,
+        uint amountIn,
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline,
+        uint8 flag
+    )
+        external
+        virtual
+        override
+        discountCHI(flag)
+        ensure(deadline)
+    {
+        TransferHelper.safeTransferFrom(
+            tokenIn, msg.sender, path[0], amountIn
+        );
+        _swapSupportingFeeOnTransferTokens(tokenIn, path, address(this));
+        uint amountOut = IERC20(WETH).balanceOf(address(this));
+        require(amountOut >= amountOutMin, 'Router: INSUFFICIENT_OUTPUT_AMOUNT');
+        transferAll(ETH_ADDRESS, to, amountOut);
+    }
     function multihopBatchSwapExactIn(
         Swap[][] memory swapSequences,
         address tokenIn,
         address tokenOut,
         uint totalAmountIn,
         uint minTotalAmountOut,
-        uint8 flag
-    )
-    public payable discountCHI(flag)
-    returns (uint totalAmountOut)
-    {
-
+        uint deadline, uint8 flag
+    ) public payable override virtual discountCHI(flag) ensure(deadline) returns (uint totalAmountOut) {
         transferFromAll(tokenIn, totalAmountIn);
+        uint balanceBefore;
+        if (!isETH(tokenOut)) {
+            balanceBefore = IERC20(tokenOut).balanceOf(msg.sender);
+        }
 
         for (uint i = 0; i < swapSequences.length; i++) {
             uint tokenAmountOut;
             for (uint k = 0; k < swapSequences[i].length; k++) {
                 Swap memory swap = swapSequences[i][k];
-                IERC20 SwapTokenIn = IERC20(swap.tokenIn);
                 if (k == 1) {
                     // Makes sure that on the second swap the output of the first was used
                     // so there is not intermediate token leftover
                     swap.swapAmount = tokenAmountOut;
                 }
 
-                IBPool pool = IBPool(swap.pool);
-                SwapTokenIn.safeApprove(swap.pool, swap.swapAmount);
-                (tokenAmountOut,) = pool.swapExactAmountIn(
-                    swap.tokenIn,
-                    swap.swapAmount,
-                    swap.tokenOut,
-                    swap.limitReturnAmount,
-                    swap.maxPrice
-                );
+                if (swap.isBPool) {
+                    TransferHelper.safeApprove(swap.tokenIn, swap.pool, swap.swapAmount);
+
+                    (tokenAmountOut,) = IBPool(swap.pool).swapExactAmountIn(
+                        swap.tokenIn,
+                        swap.swapAmount,
+                        swap.tokenOut,
+                        swap.limitReturnAmount,
+                        swap.maxPrice
+                    );
+                } else {
+                    tokenAmountOut = _swapSingleSupportFeeOnTransferTokens(swap.tokenIn, swap.tokenOut, swap.pool, swap.swapAmount, swap.limitReturnAmount);
+                }
             }
+
             // This takes the amountOut of the last swap
             totalAmountOut = tokenAmountOut.add(totalAmountOut);
         }
 
-        require(totalAmountOut >= minTotalAmountOut, "ERR_LIMIT_OUT");
+        transferAll(tokenOut, msg.sender, totalAmountOut);
+        transferAll(tokenIn, msg.sender, getBalance(tokenIn));
 
-        transferAll(tokenOut, totalAmountOut);
-        transferAll(tokenIn, getBalance(tokenIn));
-
+        if (isETH(tokenOut)) {
+            require(totalAmountOut >= minTotalAmountOut, "ERR_LIMIT_OUT");
+        } else {
+            require(IERC20(tokenOut).balanceOf(msg.sender).sub(balanceBefore) >= minTotalAmountOut, '<minTotalAmountOut');
+        }
     }
 
     function multihopBatchSwapExactOut(
@@ -302,12 +438,8 @@ contract ValueLiquidRouter {
         address tokenIn,
         address tokenOut,
         uint maxTotalAmountIn,
-        uint8 flag
-    )
-    public payable discountCHI(flag)
-    returns (uint totalAmountIn)
-    {
-
+        uint deadline, uint8 flag
+    ) public payable override virtual discountCHI(flag) ensure(deadline) returns (uint totalAmountIn) {
         transferFromAll(tokenIn, maxTotalAmountIn);
 
         for (uint i = 0; i < swapSequences.length; i++) {
@@ -315,17 +447,8 @@ contract ValueLiquidRouter {
             // Specific code for a simple swap and a multihop (2 swaps in sequence)
             if (swapSequences[i].length == 1) {
                 Swap memory swap = swapSequences[i][0];
-                IERC20 SwapTokenIn = IERC20(swap.tokenIn);
+                tokenAmountInFirstSwap = _swapSingleMixOut(swap.tokenIn, swap.tokenOut, swap.pool, swap.swapAmount, swap.limitReturnAmount, swap.maxPrice, swap.isBPool);
 
-                IBPool pool = IBPool(swap.pool);
-                SwapTokenIn.safeApprove(swap.pool, swap.limitReturnAmount);
-                (tokenAmountInFirstSwap,) = pool.swapExactAmountOut(
-                    swap.tokenIn,
-                    swap.limitReturnAmount,
-                    swap.tokenOut,
-                    swap.swapAmount,
-                    swap.maxPrice
-                );
             } else {
                 // Consider we are swapping A -> B and B -> C. The goal is to buy a given amount
                 // of token C. But first we need to buy B with A so we can then buy C with B
@@ -333,360 +456,155 @@ contract ValueLiquidRouter {
                 uint intermediateTokenAmount;
                 // This would be token B as described above
                 Swap memory secondSwap = swapSequences[i][1];
-                IBPool poolSecondSwap = IBPool(secondSwap.pool);
-                intermediateTokenAmount = poolSecondSwap.calcInGivenOut(
-                    poolSecondSwap.getBalance(secondSwap.tokenIn),
-                    poolSecondSwap.getDenormalizedWeight(secondSwap.tokenIn),
-                    poolSecondSwap.getBalance(secondSwap.tokenOut),
-                    poolSecondSwap.getDenormalizedWeight(secondSwap.tokenOut),
-                    secondSwap.swapAmount,
-                    poolSecondSwap.swapFee()
-                );
+                if (secondSwap.isBPool) {
+                    IBPool poolSecondSwap = IBPool(secondSwap.pool);
+                    intermediateTokenAmount = poolSecondSwap.calcInGivenOut(
+                        poolSecondSwap.getBalance(secondSwap.tokenIn),
+                        poolSecondSwap.getDenormalizedWeight(secondSwap.tokenIn),
+                        poolSecondSwap.getBalance(secondSwap.tokenOut),
+                        poolSecondSwap.getDenormalizedWeight(secondSwap.tokenOut),
+                        secondSwap.swapAmount,
+                        poolSecondSwap.swapFee()
+                    );
+                } else {
+                    address[] memory paths = new address[](1);
+                    paths[0] = secondSwap.pool;
+                    uint[] memory amounts = IValueLiquidFormula(formula).getFactoryAmountsIn(factory, secondSwap.tokenIn, secondSwap.tokenOut, secondSwap.swapAmount, paths);
+                    intermediateTokenAmount = amounts[0];
+                    require(intermediateTokenAmount <= secondSwap.limitReturnAmount, 'Router: EXCESSIVE_INPUT_AMOUNT');
+                }
 
                 //// Buy intermediateTokenAmount of token B with A in the first pool
                 Swap memory firstSwap = swapSequences[i][0];
-                IERC20 FirstSwapTokenIn = IERC20(firstSwap.tokenIn);
-                IBPool poolFirstSwap = IBPool(firstSwap.pool);
-                if (FirstSwapTokenIn.allowance(address(this), firstSwap.pool) < uint(- 1)) {
-                    FirstSwapTokenIn.safeApprove(firstSwap.pool, uint(- 1));
-                }
-
-                (tokenAmountInFirstSwap,) = poolFirstSwap.swapExactAmountOut(
-                    firstSwap.tokenIn,
-                    firstSwap.limitReturnAmount,
-                    firstSwap.tokenOut,
-                    intermediateTokenAmount, // This is the amount of token B we need
-                    firstSwap.maxPrice
-                );
+                tokenAmountInFirstSwap = _swapSingleMixOut(firstSwap.tokenIn, firstSwap.tokenOut, firstSwap.pool, intermediateTokenAmount, firstSwap.limitReturnAmount, firstSwap.maxPrice, firstSwap.isBPool);
 
                 //// Buy the final amount of token C desired
-                IERC20 SecondSwapTokenIn = IERC20(secondSwap.tokenIn);
-                if (SecondSwapTokenIn.allowance(address(this), secondSwap.pool) < uint(- 1)) {
-                    SecondSwapTokenIn.safeApprove(secondSwap.pool, uint(- 1));
+                if (secondSwap.isBPool) {
+                    _swapPBoolOut(secondSwap.tokenIn, secondSwap.tokenOut, secondSwap.pool, secondSwap.swapAmount, secondSwap.limitReturnAmount, secondSwap.maxPrice);
+                } else {
+                    _swapSingle(secondSwap.tokenIn, secondSwap.pool, intermediateTokenAmount, secondSwap.swapAmount);
                 }
-
-                poolSecondSwap.swapExactAmountOut(
-                    secondSwap.tokenIn,
-                    secondSwap.limitReturnAmount,
-                    secondSwap.tokenOut,
-                    secondSwap.swapAmount,
-                    secondSwap.maxPrice
-                );
             }
+
             totalAmountIn = tokenAmountInFirstSwap.add(totalAmountIn);
         }
 
         require(totalAmountIn <= maxTotalAmountIn, "ERR_LIMIT_IN");
 
-        transferAll(tokenOut, getBalance(tokenOut));
-        transferAll(tokenIn, getBalance(tokenIn));
-
+        transferAll(tokenOut, msg.sender, getBalance(tokenOut));
+        transferAll(tokenIn, msg.sender, getBalance(tokenIn));
     }
 
-    function smartSwapExactIn(
-        address tokenIn,
-        address tokenOut,
-        uint totalAmountIn,
-        uint minTotalAmountOut,
-        uint nPools,
-        uint8 flag
-    )
-    public payable discountCHI(flag)
-    returns (uint totalAmountOut)
-    {
-        Swap[] memory swaps;
-        if (isETH(tokenIn)) {
-            (swaps,) = viewSplitExactIn(address(weth), address(tokenOut), totalAmountIn, nPools);
-        } else if (isETH(tokenOut)) {
-            (swaps,) = viewSplitExactIn(address(tokenIn), address(weth), totalAmountIn, nPools);
-        } else {
-            (swaps,) = viewSplitExactIn(address(tokenIn), address(tokenOut), totalAmountIn, nPools);
-        }
-
-        totalAmountOut = batchSwapExactIn(swaps, tokenIn, tokenOut, totalAmountIn, minTotalAmountOut, 0x0);
-    }
-
-    function smartSwapExactOut(
-        address tokenIn,
-        address tokenOut,
-        uint totalAmountOut,
-        uint maxTotalAmountIn,
-        uint nPools,
-        uint8 flag
-    )
-    public payable discountCHI(flag)
-    returns (uint totalAmountIn)
-    {
-        Swap[] memory swaps;
-        if (isETH(tokenIn)) {
-            (swaps,) = viewSplitExactOut(address(weth), address(tokenOut), totalAmountOut, nPools);
-        } else if (isETH(tokenOut)) {
-            (swaps,) = viewSplitExactOut(address(tokenIn), address(weth), totalAmountOut, nPools);
-        } else {
-            (swaps,) = viewSplitExactOut(address(tokenIn), address(tokenOut), totalAmountOut, nPools);
-        }
-
-        totalAmountIn = batchSwapExactOut(swaps, tokenIn, tokenOut, maxTotalAmountIn, 0x0);
-    }
-
-    function viewSplitExactIn(
-        address tokenIn,
-        address tokenOut,
-        uint swapAmount,
-        uint nPools
-    )
-    public view
-    returns (Swap[] memory swaps, uint totalOutput)
-    {
-        address[] memory poolAddresses = registry.getBestPoolsWithLimit(tokenIn, tokenOut, nPools);
-
-        Pool[] memory pools = new Pool[](poolAddresses.length);
-        uint sumEffectiveLiquidity;
-        for (uint i = 0; i < poolAddresses.length; i++) {
-            pools[i] = getPoolData(tokenIn, tokenOut, poolAddresses[i]);
-            sumEffectiveLiquidity = sumEffectiveLiquidity.add(pools[i].effectiveLiquidity);
-        }
-
-        uint[] memory bestInputAmounts = new uint[](pools.length);
-        uint totalInputAmount;
-        for (uint i = 0; i < pools.length; i++) {
-            bestInputAmounts[i] = swapAmount.mul(pools[i].effectiveLiquidity).div(sumEffectiveLiquidity);
-            totalInputAmount = totalInputAmount.add(bestInputAmounts[i]);
-        }
-
-        if (totalInputAmount < swapAmount) {
-            bestInputAmounts[0] = bestInputAmounts[0].add(swapAmount.sub(totalInputAmount));
-        } else {
-            bestInputAmounts[0] = bestInputAmounts[0].sub(totalInputAmount.sub(swapAmount));
-        }
-
-        swaps = new Swap[](pools.length);
-
-        for (uint i = 0; i < pools.length; i++) {
-            swaps[i] = Swap({
-            pool : pools[i].pool,
-            tokenIn : tokenIn,
-            tokenOut : tokenOut,
-            swapAmount : bestInputAmounts[i],
-            limitReturnAmount : 0,
-            maxPrice : uint(- 1)
-            });
-        }
-
-        totalOutput = calcTotalOutExactIn(bestInputAmounts, pools);
-
-        return (swaps, totalOutput);
-    }
-
-    function viewSplitExactOut(
-        address tokenIn,
-        address tokenOut,
-        uint swapAmount,
-        uint nPools
-    )
-    public view
-    returns (Swap[] memory swaps, uint totalOutput)
-    {
-        address[] memory poolAddresses = registry.getBestPoolsWithLimit(tokenIn, tokenOut, nPools);
-
-        Pool[] memory pools = new Pool[](poolAddresses.length);
-        uint sumEffectiveLiquidity;
-        for (uint i = 0; i < poolAddresses.length; i++) {
-            pools[i] = getPoolData(tokenIn, tokenOut, poolAddresses[i]);
-            sumEffectiveLiquidity = sumEffectiveLiquidity.add(pools[i].effectiveLiquidity);
-        }
-
-        uint[] memory bestInputAmounts = new uint[](pools.length);
-        uint totalInputAmount;
-        for (uint i = 0; i < pools.length; i++) {
-            bestInputAmounts[i] = swapAmount.mul(pools[i].effectiveLiquidity).div(sumEffectiveLiquidity);
-            totalInputAmount = totalInputAmount.add(bestInputAmounts[i]);
-        }
-
-        if (totalInputAmount < swapAmount) {
-            bestInputAmounts[0] = bestInputAmounts[0].add(swapAmount.sub(totalInputAmount));
-        } else {
-            bestInputAmounts[0] = bestInputAmounts[0].sub(totalInputAmount.sub(swapAmount));
-        }
-
-        swaps = new Swap[](pools.length);
-
-        for (uint i = 0; i < pools.length; i++) {
-            swaps[i] = Swap({
-            pool : pools[i].pool,
-            tokenIn : tokenIn,
-            tokenOut : tokenOut,
-            swapAmount : bestInputAmounts[i],
-            limitReturnAmount : uint(- 1),
-            maxPrice : uint(- 1)
-            });
-        }
-
-        totalOutput = calcTotalOutExactOut(bestInputAmounts, pools);
-
-        return (swaps, totalOutput);
-    }
-
-    function getPoolData(
-        address tokenIn,
-        address tokenOut,
-        address poolAddress
-    )
-    internal view
-    returns (Pool memory)
-    {
-        IBPool pool = IBPool(poolAddress);
-        uint tokenBalanceIn = pool.getBalance(tokenIn);
-        uint tokenBalanceOut = pool.getBalance(tokenOut);
-        uint tokenWeightIn = pool.getDenormalizedWeight(tokenIn);
-        uint tokenWeightOut = pool.getDenormalizedWeight(tokenOut);
-        uint swapFee = pool.swapFee();
-
-        uint effectiveLiquidity = calcEffectiveLiquidity(
-            tokenWeightIn,
-            tokenBalanceOut,
-            tokenWeightOut
-        );
-        Pool memory returnPool = Pool({
-        pool : poolAddress,
-        tokenBalanceIn : tokenBalanceIn,
-        tokenWeightIn : tokenWeightIn,
-        tokenBalanceOut : tokenBalanceOut,
-        tokenWeightOut : tokenWeightOut,
-        swapFee : swapFee,
-        effectiveLiquidity : effectiveLiquidity
-        });
-
-        return returnPool;
-    }
-
-    function calcEffectiveLiquidity(
-        uint tokenWeightIn,
-        uint tokenBalanceOut,
-        uint tokenWeightOut
-    )
-    internal pure
-    returns (uint effectiveLiquidity)
-    {
-
-        // Bo * wi/(wi+wo)
-        effectiveLiquidity =
-        tokenWeightIn.mul(BONE).div(
-            tokenWeightOut.add(tokenWeightIn)
-        ).mul(tokenBalanceOut).div(BONE);
-
-        return effectiveLiquidity;
-    }
-
-    function calcTotalOutExactIn(
-        uint[] memory bestInputAmounts,
-        Pool[] memory bestPools
-    )
-    internal pure
-    returns (uint totalOutput)
-    {
-        totalOutput = 0;
-        for (uint i = 0; i < bestInputAmounts.length; i++) {
-            uint output = IBPool(bestPools[i].pool).calcOutGivenIn(
-                bestPools[i].tokenBalanceIn,
-                bestPools[i].tokenWeightIn,
-                bestPools[i].tokenBalanceOut,
-                bestPools[i].tokenWeightOut,
-                bestInputAmounts[i],
-                bestPools[i].swapFee
-            );
-
-            totalOutput = totalOutput.add(output);
-        }
-        return totalOutput;
-    }
-
-    function calcTotalOutExactOut(
-        uint[] memory bestInputAmounts,
-        Pool[] memory bestPools
-    ) internal pure returns (uint totalOutput)
-    {
-        totalOutput = 0;
-        for (uint i = 0; i < bestInputAmounts.length; i++) {
-            uint output = IBPool(bestPools[i].pool).calcInGivenOut(
-                bestPools[i].tokenBalanceIn,
-                bestPools[i].tokenWeightIn,
-                bestPools[i].tokenBalanceOut,
-                bestPools[i].tokenWeightOut,
-                bestInputAmounts[i],
-                bestPools[i].swapFee
-            );
-
-            totalOutput = totalOutput.add(output);
-        }
-        return totalOutput;
-    }
-
-
-    function transferFromAllAndApprove(address token, uint amount, address spender) internal returns (bool containsETH) {
+    function transferFromAll(address token, uint amount) internal returns (bool) {
         if (isETH(token)) {
-            require(amount == msg.value, "!invalid amount");
-            weth.deposit{value : amount}();
-            IERC20(address(weth)).safeApprove(spender, amount);
-            containsETH = true;
+            IWETH(WETH).deposit{value : msg.value}();
         } else {
-            IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
-            IERC20(token).safeApprove(spender, amount);
+            TransferHelper.safeTransferFrom(token, msg.sender, address(this), amount);
         }
-        return containsETH;
-    }
-
-    function transferFromAll(address token, uint amount) internal returns (bool containsETH) {
-        if (isETH(token)) {
-            weth.deposit{value : msg.value}();
-            containsETH = true;
-        } else {
-            IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
-        }
-        return containsETH;
+        return true;
     }
 
     function getBalance(address token) internal view returns (uint) {
         if (isETH(token)) {
-            return weth.balanceOf(address(this));
+            return IWETH(WETH).balanceOf(address(this));
         } else {
             return IERC20(token).balanceOf(address(this));
         }
     }
 
-    function transferAll(address token, uint amount) internal returns (bool) {
+    function _swapSingleMixOut(address tokenIn, address tokenOut, address pool, uint swapAmount, uint limitReturnAmount, uint maxPrice, bool isBPool) internal returns (uint tokenAmountIn) {
+        if (isBPool) {
+            return _swapPBoolOut(tokenIn, tokenOut, pool, swapAmount, limitReturnAmount, maxPrice);
+
+        } else {
+            address[] memory paths = new address[](1);
+            paths[0] = pool;
+            uint[] memory amounts = IValueLiquidFormula(formula).getFactoryAmountsIn(factory, tokenIn, tokenOut, swapAmount, paths);
+            tokenAmountIn = amounts[0];
+            require(tokenAmountIn <= limitReturnAmount, 'Router: EXCESSIVE_INPUT_AMOUNT');
+
+            _swapSingle(tokenIn, pool, tokenAmountIn, amounts[1]);
+        }
+    }
+
+    function _swapPBoolOut(address tokenIn, address tokenOut, address pool, uint swapAmount, uint limitReturnAmount, uint maxPrice) internal returns (uint tokenAmountIn) {
+        TransferHelper.safeApprove(tokenIn, pool, limitReturnAmount);
+
+        (tokenAmountIn,) = IBPool(pool).swapExactAmountOut(
+            tokenIn,
+            limitReturnAmount,
+            tokenOut,
+            swapAmount,
+            maxPrice
+        );
+    }
+
+    function _swapSingle(address tokenIn, address pair, uint targetSwapAmount, uint targetOutAmount) internal {
+        TransferHelper.safeTransfer(tokenIn, pair, targetSwapAmount);
+        (uint amount0Out, uint amount1Out) = tokenIn == IValueLiquidPair(pair).token0() ? (uint(0), targetOutAmount) : (targetOutAmount, uint(0));
+
+        IValueLiquidPair(pair).swap(amount0Out, amount1Out, address(this), new bytes(0));
+    }
+
+    function _swapSingleSupportFeeOnTransferTokens(address tokenIn, address tokenOut, address pool, uint swapAmount, uint limitReturnAmount) internal returns(uint tokenAmountOut) {
+        TransferHelper.safeTransfer(tokenIn, pool, swapAmount);
+
+        uint amountOutput;
+        {
+            (, uint reserveInput, uint reserveOutput, uint32 tokenWeightInput, uint32 tokenWeightOutput, uint32 swapFee) = IValueLiquidFormula(formula).getFactoryReserveAndWeights(factory, pool, tokenIn);
+            uint amountInput = IERC20(tokenIn).balanceOf(pool).sub(reserveInput);
+            amountOutput = IValueLiquidFormula(formula).getAmountOut(amountInput, reserveInput, reserveOutput, tokenWeightInput, tokenWeightOutput, swapFee);
+        }
+        uint balanceBefore = IERC20(tokenOut).balanceOf(address(this));
+        (uint amount0Out, uint amount1Out) = tokenIn == IValueLiquidPair(pool).token0() ? (uint(0), amountOutput) : (amountOutput, uint(0));
+        IValueLiquidPair(pool).swap(amount0Out, amount1Out, address(this), new bytes(0));
+
+        tokenAmountOut = IERC20(tokenOut).balanceOf(address(this)).sub(balanceBefore);
+        require(tokenAmountOut >= limitReturnAmount,'Router: INSUFFICIENT_OUTPUT_AMOUNT');
+    }
+
+    function _validateAmountOut(
+        address tokenIn,
+        address tokenOut,
+        uint amountIn,
+        uint amountOutMin,
+        address[] memory path
+    ) internal returns (uint[] memory amounts) {
+        amounts = IValueLiquidFormula(formula).getFactoryAmountsOut(factory, tokenIn, tokenOut, amountIn, path);
+        require(amounts[amounts.length - 1] >= amountOutMin, 'Router: INSUFFICIENT_OUTPUT_AMOUNT');
+    }
+
+    function _validateAmountIn(
+        address tokenIn,
+        address tokenOut,
+        uint amountOut,
+        uint amountInMax,
+        address[] calldata path
+    ) internal returns (uint[] memory amounts) {
+        amounts = IValueLiquidFormula(formula).getFactoryAmountsIn(factory, tokenIn, tokenOut, amountOut, path);
+        require(amounts[0] <= amountInMax, 'Router: EXCESSIVE_INPUT_AMOUNT');
+    }
+
+    function transferETHTo(uint amount, address to) internal {
+        IWETH(WETH).deposit{value: amount}();
+        assert(IWETH(WETH).transfer(to, amount));
+    }
+
+    function transferAll(address token, address to, uint amount) internal returns (bool) {
         if (amount == 0) {
             return true;
         }
+
         if (isETH(token)) {
-            weth.withdraw(amount);
-            (bool xfer,) = msg.sender.call{value : amount}("");
-            require(xfer, "ERR_ETH_FAILED");
+            IWETH(WETH).withdraw(amount);
+            TransferHelper.safeTransferETH(to, amount);
         } else {
-            IERC20(token).safeTransfer(msg.sender, amount);
+            TransferHelper.safeTransfer(token, to, amount);
         }
         return true;
     }
 
     function isETH(address token) internal pure returns (bool) {
-        return (address(token) == ETH_ADDRESS);
+        return (token == ETH_ADDRESS);
     }
-
-    /**
-     * This function allows governance to take unsupported tokens out of the contract.
-     * This is in an effort to make someone whole, should they seriously mess up.
-     * There is no guarantee governance will vote to return these.
-     * It also allows for removal of airdropped tokens.
-     */
-    function governanceRecoverUnsupported(address _token, uint _amount, address _to) external {
-        require(msg.sender == governance, "!governance");
-        if (isETH(_token)) {
-            (bool xfer,) = _to.call{value : _amount}("");
-            require(xfer, "ERR_ETH_FAILED");
-        } else {
-            IERC20(_token).safeTransfer(_to, _amount);
-        }
-    }
-
-    receive() external payable {}
 }

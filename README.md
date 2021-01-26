@@ -12,19 +12,35 @@ Committing to our mission, we create Value Liquid as an one-stop solution for al
 
 ## Documentation
 
-The full documentation can be found at [https://docs.balancer.finance](https://docs.balancer.finance)
+The full documentation can be found at [https://docs.valuedefi.io](https://docs.valuedefi.io)
 
 
 ## Development
 
-Most users will want to consume the ABI definitions for BFactory and BPool.
-
-This project follows the standard Truffle project structure. 
+This project follows the standard hardhat project structure. 
 
 ```
-yarn compile # build artifacts to `build/contracts`
-yarn testrpc # run ganache
-yarn test    # run the tests
+yarn build
+yarn test
 ```
+## Deployed Contract
+### Kovan
+ValueLiquidFormula:
 
-<p align=center>⊙</p>
+ValueLiquidRouter:
+
+ValueLiquidProvider:
+
+StakePoolController:
+
+### Production
+ValueLiquidFactory: [0x5021470fc598373fba4fe3384745940eab3e653d](https://etherscan.io/address/0x5021470fc598373fba4fe3384745940eab3e653d)
+
+ValueLiquidFormula: [0xd989212c51ba850a1787ce4c666eb44a170cc415](https://etherscan.io/address/0xd989212c51ba850a1787ce4c666eb44a170cc415)
+
+ValueLiquidRouter: [0x52F75ee5033E25f2D8343E0323F1b3fE0B9a0A03](https://etherscan.io/address/0x52F75ee5033E25f2D8343E0323F1b3fE0B9a0A03)
+
+ValueLiquidProvider: [0x6a7F824579e280a717D44a96Ae8df7fbaA774b36](https://etherscan.io/address/0x6a7F824579e280a717D44a96Ae8df7fbaA774b36)
+
+StakePoolController: [0xf0159d041DB29029cCF285A1043DcAAc7088030b](https://etherscan.io/address/0xf0159d041DB29029cCF285A1043DcAAc7088030b)
+

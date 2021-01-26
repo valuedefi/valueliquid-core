@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 
-pragma solidity 0.6.12;
+pragma solidity >=0.7.6;
 
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "./IERC20.sol";
 
 interface IBPool is IERC20 {
     function version() external view returns(uint);
@@ -57,4 +57,6 @@ interface IBPool is IERC20 {
     function finalizeRewardFundInfo(address _rewardFund, uint _unstakingFrozenTime) external;
     function addRewardPool(IERC20 _rewardToken, uint256 _startBlock, uint256 _endRewardBlock, uint256 _rewardPerBlock,
         uint256 _lockRewardPercent, uint256 _startVestingBlock, uint256 _endVestingBlock) external;
+    function isBound(address t) external view returns (bool);
+    function getSpotPrice(address tokenIn, address tokenOut) external view returns (uint spotPrice);
 }
