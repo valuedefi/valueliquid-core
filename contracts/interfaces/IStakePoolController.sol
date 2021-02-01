@@ -15,19 +15,7 @@ interface IStakePoolController {
     event SetFeeToken(address indexed token);
     event SetFeeAmount(uint indexed amount);
 
-    struct PoolRewardInfo {
-        address rewardToken;
-        address rewardRebaser;
-        address rewardMultiplier;
-        uint256 startBlock;
-        uint256 endRewardBlock;
-        uint256 rewardPerBlock;
-        uint256 lockRewardPercent;
-        uint256 startVestingBlock;
-        uint256 endVestingBlock;
-        uint unstakingFrozenTime;
-        uint rewardFundAmount;
-    }
+
 
     function allStakePools(uint) external view returns (address stakePool);
 
@@ -43,19 +31,18 @@ interface IStakePoolController {
     function addStakePoolCreator(address contractAddress) external;
 
     function isWhitelistRewardRebaser(address contractAddress) external view returns (bool);
-
+    function isAllowEmergencyWithdrawStakePool(address _address) external view returns (bool);
     function setWhitelistRewardRebaser(address contractAddress, bool state) external;
 
     function isWhitelistRewardMultiplier(address contractAddress) external view returns (bool);
-
+    function setAllowEmergencyWithdrawStakePool(address _address, bool state) external;
     function setWhitelistRewardMultiplier(address contractAddress, bool state) external;
     function setEnableWhitelistRewardRebaser(bool value) external;
     function setEnableWhitelistRewardMultiplier(bool value) external;
     function allStakePoolsLength() external view returns (uint);
 
-    function create(uint version, address pair, uint delayTimeLock, PoolRewardInfo calldata poolRewardInfo, uint8 flag) external returns (address);
-
-    function createPair(uint version, address tokenA, address tokenB, uint32 tokenWeightA, uint32 swapFee, uint delayTimeLock, PoolRewardInfo calldata poolRewardInfo, uint8 flag) external returns (address);
+    function create(uint version, address pair, address rewardToken, uint rewardFundAmount, uint delayTimeLock, bytes calldata data, uint8 flag) external returns (address);
+    function createPair(uint version, address tokenA, address tokenB, uint32 tokenWeightA, uint32 swapFee, address rewardToken, uint rewardFundAmount, uint delayTimeLock, bytes calldata poolRewardInfo, uint8 flag) external returns (address);
 
     function setGovernance(address) external;
 

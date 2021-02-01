@@ -14,9 +14,28 @@ import {
 import {
 	StakePoolController,
 	ValueLiquidErc20,
-	ValueLiquidPair, StakePoolCreator, Erc20Factory
+	ValueLiquidPair, StakePoolCreator, Erc20Factory, EpochControllerMockFactory, SimpleEpochControllerFactory
 } from "../../typechain";
+import {ParamType} from "@ethersproject/abi/src.ts/fragments";
+import {encodeEpochPoolInfo} from "./StakePoolEpochReward.spec";
 const overrides = {};
+function encodeParameters(types: Array<string | ParamType>, values: Array<any>) {
+	const abi = new ethers.utils.AbiCoder();
+	return abi.encode(types, values);
+}
+export function encodePoolInfo(data : any) {
+	return encodeParameters([ 'address', 'address', 'uint256', 'uint256', 'uint256', 'uint256', 'uint256', 'uint256', 'uint256'], [
+		data.rewardRebaser,
+		data.rewardMultiplier,
+		data.startBlock,
+		data.endRewardBlock,
+		data.rewardPerBlock,
+		data.lockRewardPercent,
+		data.startVestingBlock,
+		data.endVestingBlock,
+		data.unstakingFrozenTime,
+	])
+}
 describe('StakePoolController', () => {
 	let signers: SignerWithAddress[];
 	let wallet: SignerWithAddress;
@@ -41,6 +60,7 @@ describe('StakePoolController', () => {
 		pair = v2Pair.pair;
 		version = await stakePoolCreator.version();
 		await stakePoolController.addStakePoolCreator(stakePoolCreator.address);
+		await stakePoolController.addStakePoolCreator(fixture.stakePoolEpochRewardCreator.address);
 		await token0.approve(v2Pair.router.address, maxUint256);
 		await token1.approve(v2Pair.router.address, maxUint256);
 	})
@@ -88,7 +108,7 @@ describe('StakePoolController', () => {
 	})
 	it('create invalid version', async () => {
 		let latestBlockNumber = await getLatestBlockNumber(ethers);
-		await expect(stakePoolController.connect(other).create(1, v2Pair.pair.address, 3600 * 48, {
+		await expect(stakePoolController.connect(other).create(1, v2Pair.pair.address,v2Pair.token0.address,0, 3600 * 48, encodePoolInfo({
 			rewardToken: v2Pair.token0.address,
 			rewardRebaser: ADDRESS_ZERO,
 			rewardMultiplier: ADDRESS_ZERO,
@@ -99,14 +119,12 @@ describe('StakePoolController', () => {
 			startVestingBlock: 0,
 			endVestingBlock: 0,
 			unstakingFrozenTime: 0,
-			rewardFundAmount: 0,
-		}, 0)).to.be.revertedWith("StakePoolController: Invalid stake pool creator version");
+		}), 0)).to.be.revertedWith("StakePoolController: Invalid stake pool creator version");
 
 	})
 	it('create invalid pair', async () => {
 		let latestBlockNumber = await getLatestBlockNumber(ethers);
-		await expect(stakePoolController.connect(other).create(version, wallet.address, 3600 * 48, {
-			rewardToken: v2Pair.token0.address,
+		await expect(stakePoolController.connect(other).create(version, wallet.address,v2Pair.token0.address,0, 3600 * 48, encodePoolInfo({
 			rewardRebaser: ADDRESS_ZERO,
 			rewardMultiplier: ADDRESS_ZERO,
 			startBlock: latestBlockNumber + 1,
@@ -116,14 +134,12 @@ describe('StakePoolController', () => {
 			startVestingBlock: 0,
 			endVestingBlock: 0,
 			unstakingFrozenTime: 0,
-			rewardFundAmount: 0,
-		}, 0)).to.be.revertedWith("StakePoolController: invalid pair");
+		}), 0)).to.be.revertedWith("StakePoolController: invalid pair");
 
 	})
 	it('create invalid lockRewardPercent', async () => {
 		let latestBlockNumber = await getLatestBlockNumber(ethers);
-		await expect(stakePoolController.connect(other).create(version, v2Pair.pair.address, 3600 * 48, {
-			rewardToken: v2Pair.token0.address,
+		await expect(stakePoolController.connect(other).create(version, v2Pair.pair.address,v2Pair.token0.address,0, 3600 * 48, encodePoolInfo({
 			rewardRebaser: ADDRESS_ZERO,
 			rewardMultiplier: ADDRESS_ZERO,
 			startBlock: latestBlockNumber + 1,
@@ -133,13 +149,11 @@ describe('StakePoolController', () => {
 			startVestingBlock: 0,
 			endVestingBlock: 0,
 			unstakingFrozenTime: 0,
-			rewardFundAmount: 0,
-		}, 0)).to.be.revertedWith("StakePool: invalid lockRewardPercent");
+		}), 0)).to.be.revertedWith("StakePool: invalid lockRewardPercent");
 	})
 	it('create invalid rewardToken balance', async () => {
 		let latestBlockNumber = await getLatestBlockNumber(ethers);
-		await expect(stakePoolController.connect(other).create(version, v2Pair.pair.address, 3600 * 48, {
-			rewardToken: v2Pair.token0.address,
+		await expect(stakePoolController.connect(other).create(version, v2Pair.pair.address,v2Pair.token0.address,1000000, 3600 * 48, encodePoolInfo({
 			rewardRebaser: ADDRESS_ZERO,
 			rewardMultiplier: ADDRESS_ZERO,
 			startBlock: latestBlockNumber + 1,
@@ -149,14 +163,12 @@ describe('StakePoolController', () => {
 			startVestingBlock: latestBlockNumber + 100,
 			endVestingBlock: latestBlockNumber + 101,
 			unstakingFrozenTime: 0,
-			rewardFundAmount: 1000000,
-		}, 0)).to.be.revertedWith("StakePoolController: Not enough rewardFundAmount");
+		}), 0)).to.be.revertedWith("StakePoolController: Not enough rewardFundAmount");
 	})
 	it('create invalid endVestingBlock', async () => {
 		let latestBlockNumber = await getLatestBlockNumber(ethers);
 		await v2Pair.token0.approve(stakePoolController.address, maxUint256);
-		await expect(stakePoolController.connect(wallet).create(version, v2Pair.pair.address, 3600 * 48, {
-			rewardToken: v2Pair.token0.address,
+		await expect(stakePoolController.connect(wallet).create(version, v2Pair.pair.address,v2Pair.token0.address,10, 3600 * 48, encodePoolInfo({
 			rewardRebaser: ADDRESS_ZERO,
 			rewardMultiplier: ADDRESS_ZERO,
 			startBlock: latestBlockNumber + 1,
@@ -166,14 +178,12 @@ describe('StakePoolController', () => {
 			startVestingBlock: latestBlockNumber + 101,
 			endVestingBlock: latestBlockNumber + 100,
 			unstakingFrozenTime: 0,
-			rewardFundAmount: 10,
-		}, 0)).to.be.revertedWith("StakePool: startVestingBlock > endVestingBlock");
+		}), 0)).to.be.revertedWith("StakePool: startVestingBlock > endVestingBlock");
 	})
 	it('create invalid rewardRebaser', async () => {
 		let latestBlockNumber = await getLatestBlockNumber(ethers);
 		await v2Pair.token0.approve(stakePoolController.address, maxUint256);
-		let poolRewardInfo = {
-			rewardToken: v2Pair.token0.address,
+		let poolRewardInfo = encodePoolInfo({
 			rewardRebaser: wallet.address,
 			rewardMultiplier: ADDRESS_ZERO,
 			startBlock: latestBlockNumber + 1,
@@ -183,18 +193,16 @@ describe('StakePoolController', () => {
 			startVestingBlock: latestBlockNumber + 100,
 			endVestingBlock: latestBlockNumber + 101,
 			unstakingFrozenTime: 0,
-			rewardFundAmount: 10,
-		};
-		await expect(stakePoolController.connect(wallet).create(version, v2Pair.pair.address, 3600 * 48, poolRewardInfo, 0)).to.be.revertedWith("StakePool: Invalid reward rebaser");
+		});
+		await expect(stakePoolController.connect(wallet).create(version, v2Pair.pair.address,v2Pair.token0.address,  10, 3600 * 48, poolRewardInfo, 0)).to.be.revertedWith("StakePool: Invalid reward rebaser");
 		await stakePoolController.setWhitelistRewardRebaser(wallet.address, true);
-		await stakePoolController.connect(wallet).create(version, v2Pair.pair.address, 3600 * 48, poolRewardInfo, 0);
+		await stakePoolController.connect(wallet).create(version, v2Pair.pair.address,v2Pair.token0.address,  10, 3600 * 48, poolRewardInfo, 0);
 
 	})
 	it('create invalid delayTimeLock', async () => {
 		let latestBlockNumber = await getLatestBlockNumber(ethers);
 		await v2Pair.token0.approve(stakePoolController.address, maxUint256);
-		let poolRewardInfo = {
-			rewardToken: v2Pair.token0.address,
+		let poolRewardInfo = encodePoolInfo({
 			rewardRebaser: ADDRESS_ZERO,
 			rewardMultiplier: ADDRESS_ZERO,
 			startBlock: latestBlockNumber + 1,
@@ -204,18 +212,16 @@ describe('StakePoolController', () => {
 			startVestingBlock: latestBlockNumber + 100,
 			endVestingBlock: latestBlockNumber + 101,
 			unstakingFrozenTime: 0,
-			rewardFundAmount: 10,
-		};
-		await expect(stakePoolController.connect(wallet).create(version, v2Pair.pair.address, 3600, poolRewardInfo, 0)).to.be.revertedWith("Timelock::setDelay: Delay must exceed minimum delay.");
+		});
+		await expect(stakePoolController.connect(wallet).create(version, v2Pair.pair.address,v2Pair.token0.address,10, 3600, poolRewardInfo, 0)).to.be.revertedWith("Timelock::setDelay: Delay must exceed minimum delay.");
 		await stakePoolController.setWhitelistRewardRebaser(wallet.address, true);
-		await stakePoolController.connect(wallet).create(version, v2Pair.pair.address, 3600 * 48, poolRewardInfo, 0);
+		await stakePoolController.connect(wallet).create(version, v2Pair.pair.address,v2Pair.token0.address,10, 3600 * 48, poolRewardInfo, 0);
 
 	})
 	it('create invalid rewardMultiplier', async () => {
 		let latestBlockNumber = await getLatestBlockNumber(ethers);
 		await v2Pair.token0.approve(stakePoolController.address, maxUint256);
-		let poolRewardInfo = {
-			rewardToken: v2Pair.token0.address,
+		let poolRewardInfo = encodePoolInfo({
 			rewardRebaser: ADDRESS_ZERO,
 			rewardMultiplier: wallet.address,
 			startBlock: latestBlockNumber + 1,
@@ -225,17 +231,15 @@ describe('StakePoolController', () => {
 			startVestingBlock: latestBlockNumber + 100,
 			endVestingBlock: latestBlockNumber + 101,
 			unstakingFrozenTime: 0,
-			rewardFundAmount: 10,
-		};
-		await expect(stakePoolController.connect(wallet).create(version, v2Pair.pair.address, 3600 * 48, poolRewardInfo, 0)).to.be.revertedWith("StakePool: Invalid reward multiplier");
+		});
+		await expect(stakePoolController.connect(wallet).create(version, v2Pair.pair.address, v2Pair.token0.address,10, 3600 * 48, poolRewardInfo, 0)).to.be.revertedWith("StakePool: Invalid reward multiplier");
 		await stakePoolController.setWhitelistRewardMultiplier(wallet.address, true);
-		await stakePoolController.connect(wallet).create(version, v2Pair.pair.address, 3600 * 48, poolRewardInfo, 0);
+		await stakePoolController.connect(wallet).create(version, v2Pair.pair.address, v2Pair.token0.address,10, 3600 * 48, poolRewardInfo, 0);
 	})
 	it('create valid pool', async () => {
 		let latestBlockNumber = await getLatestBlockNumber(ethers);
 		await v2Pair.token0.approve(stakePoolController.address, maxUint256);
-		let poolRewardInfo = {
-			rewardToken: v2Pair.token0.address,
+		let poolRewardInfo = encodePoolInfo({
 			rewardRebaser: ADDRESS_ZERO,
 			rewardMultiplier: ADDRESS_ZERO,
 			startBlock: latestBlockNumber + 1,
@@ -245,9 +249,8 @@ describe('StakePoolController', () => {
 			startVestingBlock: latestBlockNumber + 100,
 			endVestingBlock: latestBlockNumber + 101,
 			unstakingFrozenTime: 0,
-			rewardFundAmount: 10,
-		};
-		await expect(stakePoolController.connect(wallet).create(version, v2Pair.pair.address, 3600 * 48, poolRewardInfo, 0))
+		});
+		await expect(stakePoolController.connect(wallet).create(version, v2Pair.pair.address, v2Pair.token0.address,10,  3600 * 48, poolRewardInfo, 0))
 			.to.emit(stakePoolController, 'MasterCreated');
 
 
@@ -260,8 +263,7 @@ describe('StakePoolController', () => {
 		await stakePoolController.setFeeCollector(other.address)
 		await stakePoolController.setFeeToken(feeToken.address);
 		await feeToken.approve(stakePoolController.address, toWei(1))
-		let poolRewardInfo = {
-			rewardToken: v2Pair.token0.address,
+		let poolRewardInfo = encodePoolInfo({
 			rewardRebaser: ADDRESS_ZERO,
 			rewardMultiplier: ADDRESS_ZERO,
 			startBlock: latestBlockNumber + 1,
@@ -271,9 +273,20 @@ describe('StakePoolController', () => {
 			startVestingBlock: latestBlockNumber + 100,
 			endVestingBlock: latestBlockNumber + 101,
 			unstakingFrozenTime: 0,
-			rewardFundAmount: 10,
-		};
-		await expect(() => stakePoolController.connect(wallet).create(version, v2Pair.pair.address, 3600 * 48, poolRewardInfo, 0))
+		});
+		await expect(() => stakePoolController.connect(wallet).create(version, v2Pair.pair.address, v2Pair.token0.address,10, 3600 * 48, poolRewardInfo, 0))
 			.to.changeTokenBalance(feeToken, other, toWei(1));
+	})
+
+	it('create valid SimpleEpochController', async () => {
+		await v2Pair.token0.approve(stakePoolController.address, maxUint256);
+		const epochController = await new SimpleEpochControllerFactory(wallet).deploy();
+		let poolRewardInfo = encodeEpochPoolInfo({
+			epochController: epochController.address,
+			withdrawLockupEpochs: 2,
+			rewardLockupEpochs: 1,
+
+		});
+		await stakePoolController.connect(wallet).create(4001, v2Pair.pair.address, v2Pair.token0.address,10, 3600 * 48, poolRewardInfo, 0);
 	})
 })

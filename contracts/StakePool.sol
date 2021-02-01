@@ -58,10 +58,11 @@ contract StakePool is IStakePool {
     uint public unstakingFrozenTime = 3 days;
     uint private unlocked = 1;
     bool private _initialized = false;
+    uint256 public constant BLOCKS_PER_DAY = 6528;
 
     constructor(address _controller,uint _version) public {
         controller = _controller;
-        timelock = _controller;
+        timelock = msg.sender;
         version = _version;
     }
     modifier lock() {
@@ -73,6 +74,19 @@ contract StakePool is IStakePool {
     modifier onlyTimeLock() {
         require(msg.sender == timelock, "StakePool: !timelock");
         _;
+    }
+
+    function allowRecoverRewardToken(address _token) external view override returns (bool) {
+        for (uint8 pid = 0; pid < rewardPoolInfo.length; ++pid) {
+            RewardPoolInfo storage rewardPool = rewardPoolInfo[pid];
+            if (rewardPool.rewardToken == _token) {
+                // do not allow to drain reward token if less than 30 days after pool ends
+                if (block.number < (rewardPool.endRewardBlock + (BLOCKS_PER_DAY * 30))) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
     // called once by the factory at time of deployment
     function initialize(address _pair, uint _unstakingFrozenTime, address _rewardFund, address _timelock) external override {
@@ -125,11 +139,6 @@ contract StakePool is IStakePool {
         emit UpdateRewardMultiplier(_pid, _rewardMultiplier);
     }
 
-    function getEndRewardBlock(uint8 _pid) external override view returns (address, uint) {
-        RewardPoolInfo storage rewardPool = rewardPoolInfo[_pid];
-        return (rewardPool.rewardToken, rewardPool.endRewardBlock);
-    }
-
     function updateRewardRebaser(uint8 _pid, address _rewardRebaser) external override lock onlyTimeLock {
         require(IStakePoolController(controller).isWhitelistRewardRebaser(_rewardRebaser), "StakePool: Invalid reward rebaser");
         updateReward(_pid);
@@ -141,10 +150,11 @@ contract StakePool is IStakePool {
     // Return reward multiplier over the given _from to _to block.
     function getRewardMultiplier(uint8 _pid, uint _from, uint _to, uint _rewardPerBlock) public override view returns (uint) {
         RewardPoolInfo storage rewardPool = rewardPoolInfo[_pid];
-        if (rewardPool.rewardMultiplier == address(0)) {
+        address rewardMultiplier = rewardPool.rewardMultiplier;
+        if (rewardMultiplier == address(0)) {
             return _to.sub(_from).mul(_rewardPerBlock);
         }
-        return IStakePoolRewardMultiplier(rewardPool.rewardMultiplier).getRewardMultiplier(
+        return IStakePoolRewardMultiplier(rewardMultiplier).getRewardMultiplier(
             rewardPool.startRewardBlock,
             rewardPool.endRewardBlock,
             _from,
@@ -155,10 +165,11 @@ contract StakePool is IStakePool {
 
     function getRewardRebase(uint8 _pid, address _rewardToken, uint _pendingReward) public override view returns (uint) {
         RewardPoolInfo storage rewardPool = rewardPoolInfo[_pid];
-        if (rewardPool.rewardRebaser == address(0)) {
+        address rewardRebaser = rewardPool.rewardRebaser;
+        if (rewardRebaser == address(0)) {
             return _pendingReward;
         }
-        return IStakePoolRewardRebaser(rewardPool.rewardRebaser).getRebaseAmount(_rewardToken, _pendingReward);
+        return IStakePoolRewardRebaser(rewardRebaser).getRebaseAmount(_rewardToken, _pendingReward);
     }
 
     function getRewardPerBlock(uint8 pid) external override view returns (uint) {
@@ -234,12 +245,16 @@ contract StakePool is IStakePool {
             getReward(_pid, _account);
         }
     }
+    function claimReward() external override {
+        getAllRewards(msg.sender);
+    }
 
     function getReward(uint8 _pid, address _account) public override {
         updateReward(_pid);
         UserInfo storage user = userInfo[_account];
         RewardPoolInfo storage rewardPool = rewardPoolInfo[_pid];
-        uint _pendingReward = user.amount.mul(rewardPool.accRewardPerShare).div(1e18).sub(user.rewardDebt[_pid]);
+        uint _accRewardPerShare = rewardPool.accRewardPerShare;
+        uint _pendingReward = user.amount.mul(_accRewardPerShare).div(1e18).sub(user.rewardDebt[_pid]);
         uint _lockRewardPercent = rewardPool.lockRewardPercent;
         if (_lockRewardPercent > 0) {
             if (block.number > rewardPool.endVestingBlock) {
@@ -254,8 +269,9 @@ contract StakePool is IStakePool {
                     _pendingReward = _pendingReward.sub(_toLocked);
                     user.lockReward[_pid] = user.lockReward[_pid].add(_toLocked);
                 }
-                if (block.number > rewardPool.startVestingBlock) {
-                    uint _toReleased = user.lockReward[_pid].mul(block.number.sub(rewardPool.startVestingBlock)).div(rewardPool.numOfVestingBlocks);
+                uint _startVestingBlock = rewardPool.startVestingBlock;
+                if (block.number > _startVestingBlock) {
+                    uint _toReleased = user.lockReward[_pid].mul(block.number.sub(_startVestingBlock)).div(rewardPool.numOfVestingBlocks);
                     uint _lockRewardReleased = user.lockRewardReleased[_pid];
                     if (_toReleased > _lockRewardReleased) {
                         uint _unlockReward = _toReleased.sub(_lockRewardReleased);
@@ -268,17 +284,18 @@ contract StakePool is IStakePool {
         if (_pendingReward > 0) {
             user.accumulatedEarned[_pid] = user.accumulatedEarned[_pid].add(_pendingReward);
             rewardPool.totalPaidRewards = rewardPool.totalPaidRewards.add(_pendingReward);
-            user.rewardDebt[_pid] = user.amount.mul(rewardPool.accRewardPerShare).div(1e18);
+            user.rewardDebt[_pid] = user.amount.mul(_accRewardPerShare).div(1e18);
             uint reward = user.reward[_pid].add(_pendingReward);
             user.reward[_pid] = reward;
             // Safe reward transfer, just in case if rounding error causes pool to not have enough reward amount
-            uint rewardBalance = IERC20(rewardPool.rewardToken).balanceOf(rewardFund);
+            address rewardToken = rewardPool.rewardToken;
+            uint rewardBalance = IERC20(rewardToken).balanceOf(rewardFund);
             if (rewardBalance > 0) {
                 user.reward[_pid] = 0;
-                uint rebaseAmount = getRewardRebase(_pid, rewardPool.rewardToken, reward);
+                uint rebaseAmount = getRewardRebase(_pid, rewardToken, reward);
                 uint paidAmount = rebaseAmount > rewardBalance ? rewardBalance : rebaseAmount;
-                IStakePoolRewardFund(rewardFund).safeTransfer(rewardPool.rewardToken, _account, paidAmount);
-                emit PayRewardPool(_pid, rewardPool.rewardToken, _account, reward, rebaseAmount, paidAmount);
+                IStakePoolRewardFund(rewardFund).safeTransfer(rewardToken, _account, paidAmount);
+                emit PayRewardPool(_pid, rewardToken, _account, reward, rebaseAmount, paidAmount);
             }
         }
     }
@@ -289,9 +306,11 @@ contract StakePool is IStakePool {
         RewardPoolInfo storage rewardPool = rewardPoolInfo[_pid];
         uint _accRewardPerShare = rewardPool.accRewardPerShare;
         uint lpSupply = IValueLiquidPair(pair).balanceOf(address(this));
-        uint _endRewardBlockApplicable = block.number > rewardPool.endRewardBlock ? rewardPool.endRewardBlock : block.number;
-        if (_endRewardBlockApplicable > rewardPool.lastRewardBlock && lpSupply != 0) {
-            uint _incRewardPerShare = getRewardMultiplier(_pid, rewardPool.lastRewardBlock, _endRewardBlockApplicable, rewardPool.rewardPerBlock).mul(1e18).div(lpSupply);
+        uint _endRewardBlock = rewardPool.endRewardBlock;
+        uint _endRewardBlockApplicable = block.number > _endRewardBlock ? _endRewardBlock : block.number;
+        uint _lastRewardBlock = rewardPool.lastRewardBlock;
+        if (_endRewardBlockApplicable > _lastRewardBlock && lpSupply != 0) {
+            uint _incRewardPerShare = getRewardMultiplier(_pid, _lastRewardBlock, _endRewardBlockApplicable, rewardPool.rewardPerBlock).mul(1e18).div(lpSupply);
             _accRewardPerShare = _accRewardPerShare.add(_incRewardPerShare);
         }
         uint pending = user.amount.mul(_accRewardPerShare).div(1e18).add(user.reward[_pid]).sub(user.rewardDebt[_pid]);
@@ -300,6 +319,7 @@ contract StakePool is IStakePool {
 
     // Withdraw without caring about rewards. EMERGENCY ONLY.
     function emergencyWithdraw() external lock override {
+        require(IStakePoolController(controller).isAllowEmergencyWithdrawStakePool(address(this)),"StakePool: Not allow emergencyWithdraw");
         UserInfo storage user = userInfo[msg.sender];
         uint amount = user.amount;
         balance = balance.sub(amount);
@@ -330,11 +350,13 @@ contract StakePool is IStakePool {
 
     function updateReward(uint8 _pid) public override {
         RewardPoolInfo storage rewardPool = rewardPoolInfo[_pid];
-        uint _endRewardBlockApplicable = block.number > rewardPool.endRewardBlock ? rewardPool.endRewardBlock : block.number;
-        if (_endRewardBlockApplicable > rewardPool.lastRewardBlock) {
+        uint _endRewardBlock = rewardPool.endRewardBlock;
+        uint _endRewardBlockApplicable = block.number > _endRewardBlock ? _endRewardBlock : block.number;
+        uint _lastRewardBlock = rewardPool.lastRewardBlock;
+        if (_endRewardBlockApplicable > _lastRewardBlock) {
             uint lpSupply = IValueLiquidPair(pair).balanceOf(address(this));
             if (lpSupply > 0) {
-                uint _incRewardPerShare = getRewardMultiplier(_pid, rewardPool.lastRewardBlock, _endRewardBlockApplicable, rewardPool.rewardPerBlock).mul(1e18).div(lpSupply);
+                uint _incRewardPerShare = getRewardMultiplier(_pid, _lastRewardBlock, _endRewardBlockApplicable, rewardPool.rewardPerBlock).mul(1e18).div(lpSupply);
                 rewardPool.accRewardPerShare = rewardPool.accRewardPerShare.add(_incRewardPerShare);
             }
             rewardPool.lastRewardBlock = _endRewardBlockApplicable;

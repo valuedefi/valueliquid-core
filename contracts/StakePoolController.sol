@@ -34,7 +34,7 @@ contract StakePoolController is IStakePoolController {
     bool private _initialized = false;
 
     IFreeFromUpTo public constant chi = IFreeFromUpTo(0x0000000000004946c0e9F43F4Dee607b0eF1fA1c);
-
+    mapping(address => bool) public allowEmergencyWithdrawStakePools;
     modifier discountCHI(uint8 flag) {
         uint256 gasStart = gasleft();
         _;
@@ -90,10 +90,17 @@ contract StakePoolController is IStakePoolController {
     function isStakePoolVerifier(address _address) external override view returns (bool){
         return _stakePoolVerifiers[_address];
     }
+    function isAllowEmergencyWithdrawStakePool(address _address) external override view returns (bool){
+        return allowEmergencyWithdrawStakePools[_address];
+    }
     function setWhitelistStakingFor(address _address, bool state) external onlyGovernance override {
         require(_address != address(0), "StakePoolController: invalid address");
         _whitelistStakingFor[_address] = state;
         emit SetWhitelistStakingFor(_address, state);
+    }
+    function setAllowEmergencyWithdrawStakePool(address _address, bool state) external onlyGovernance override {
+        require(_address != address(0), "StakePoolController: invalid address");
+        allowEmergencyWithdrawStakePools[_address] = state;
     }
 
     function setStakePoolVerifier(address _address, bool state) external onlyGovernance override {
@@ -148,46 +155,39 @@ contract StakePoolController is IStakePoolController {
     function allStakePoolsLength() external override view returns (uint) {
         return allStakePools.length;
     }
-    function createPair(uint version, address tokenA, address tokenB, uint32 tokenWeightA, uint32 swapFee, uint delayTimeLock, PoolRewardInfo calldata poolRewardInfo, uint8 flag) public discountCHI(flag)  override returns (address) {
+    function createPair(uint version, address tokenA, address tokenB, uint32 tokenWeightA, uint32 swapFee, address rewardToken, uint rewardFundAmount, uint delayTimeLock, bytes calldata poolRewardInfo, uint8 flag) public override discountCHI(flag)   returns (address) {
         address pair = swapFactory.getPair(tokenA, tokenB, tokenWeightA, swapFee);
         if (pair == address(0)){
             pair = swapFactory.createPair(tokenA, tokenB, tokenWeightA, swapFee);
         }
-        return create(version, pair, delayTimeLock, poolRewardInfo, 0);
+        return create(version, pair, rewardToken, rewardFundAmount, delayTimeLock, poolRewardInfo, 0);
     }
-    function _addRewardPool(IStakePool pool, PoolRewardInfo calldata poolRewardInfo) internal {
-            pool.addRewardPool(
-            poolRewardInfo.rewardToken,
-            poolRewardInfo.rewardRebaser,
-            poolRewardInfo.rewardMultiplier,
-            poolRewardInfo.startBlock,
-            poolRewardInfo.endRewardBlock,
-            poolRewardInfo.rewardPerBlock,
-            poolRewardInfo.lockRewardPercent,
-            poolRewardInfo.startVestingBlock,
-            poolRewardInfo.endVestingBlock);
+    function createInternal(address stakePoolCreator, address pair, address stakePoolRewardFund, address rewardToken, uint delayTimeLock, bytes calldata data) internal returns (address) {
+        TimeLock timelock = new TimeLock();
+        IStakePool pool = IStakePool(IStakePoolCreator(stakePoolCreator).create());
+        allStakePools.push(address(pool));
+        _stakePools[address(pool)] = true;
+        emit MasterCreated(address(pool), pair, pool.version(), address(timelock), stakePoolRewardFund, allStakePools.length);
+        IStakePoolCreator(stakePoolCreator).initialize(address(pool), pair, rewardToken, address(timelock), address(stakePoolRewardFund), data);
+        StakePoolRewardFund(stakePoolRewardFund).initialize(address(pool), address(timelock));
+        timelock.initialize(msg.sender, delayTimeLock);
+        return address(pool);
     }
-    function create(uint version, address pair, uint delayTimeLock, PoolRewardInfo calldata poolRewardInfo, uint8 flag) public  discountCHI(flag) override returns (address) {
+    function create(uint version, address pair, address rewardToken, uint rewardFundAmount, uint delayTimeLock, bytes calldata data, uint8 flag) public override discountCHI(flag)  returns (address) {
+
         require(swapFactory.isPair(pair), "StakePoolController: invalid pair");
         address stakePoolCreator = stakePoolCreators[version];
         require(stakePoolCreator != address(0), "StakePoolController: Invalid stake pool creator version");
-        IStakePool pool = IStakePool(IStakePoolCreator(stakePoolCreator).create());
 
         if (feeCollector != address(0) && feeToken != address(0) && feeAmount > 0) {
             TransferHelper.safeTransferFrom(feeToken, msg.sender, feeCollector, feeAmount);
         }
 
-        allStakePools.push(address(pool));
-        _stakePools[address(pool)] = true;
-        TimeLock timelock = new TimeLock();
         StakePoolRewardFund stakePoolRewardFund = new StakePoolRewardFund();
-        emit MasterCreated(address(pool), pair, IStakePoolCreator(stakePoolCreator).version(), address(timelock), address(stakePoolRewardFund), allStakePools.length);
-        timelock.initialize(msg.sender, delayTimeLock);
-        stakePoolRewardFund.initialize(address(pool), address(timelock));
-        require(IERC20(poolRewardInfo.rewardToken).balanceOf(msg.sender) >= poolRewardInfo.rewardFundAmount , "StakePoolController: Not enough rewardFundAmount");
-        TransferHelper.safeTransferFrom(poolRewardInfo.rewardToken, msg.sender, address(stakePoolRewardFund), poolRewardInfo.rewardFundAmount);
-        _addRewardPool(pool, poolRewardInfo);
-        pool.initialize(pair, poolRewardInfo.unstakingFrozenTime, address(stakePoolRewardFund), address(timelock));
-        return address(pool);
+        if (rewardFundAmount > 0) {
+            require(IERC20(rewardToken).balanceOf(msg.sender) >= rewardFundAmount , "StakePoolController: Not enough rewardFundAmount");
+            TransferHelper.safeTransferFrom(rewardToken, msg.sender, address(stakePoolRewardFund), rewardFundAmount);
+        }
+        return createInternal(stakePoolCreator, pair, address(stakePoolRewardFund), rewardToken, delayTimeLock, data);
     }
 }

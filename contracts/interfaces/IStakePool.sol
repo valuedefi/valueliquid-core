@@ -10,8 +10,8 @@ interface IStakePool {
     event UpdateRewardRebaser(uint256 indexed poolId, address rewardRebaser);
     event UpdateRewardMultiplier(uint256 indexed poolId, address rewardMultiplier);
     event Withdraw(address indexed account, uint256 amount);
-    function version() external returns (uint);
-    function pair() external returns (address);
+    function version() external view returns (uint);
+    function pair() external view returns (address);
     function initialize(address _pair, uint _unstakingFrozenTime, address _rewardFund, address _timelock) external;
 
     function stake(uint) external;
@@ -23,10 +23,10 @@ interface IStakePool {
     function getReward(uint8 _pid, address _account) external;
 
     function getAllRewards(address _account) external;
-
+    function claimReward() external;
     function pendingReward(uint8 _pid, address _account) external view returns (uint);
 
-    function getEndRewardBlock(uint8 _pid) external view returns (address, uint);
+    function allowRecoverRewardToken(address _token) external view returns (bool);
     function getRewardPerBlock(uint8 pid) external view returns (uint);
     function rewardPoolInfoLength() external view returns (uint);
 

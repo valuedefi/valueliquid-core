@@ -34,14 +34,6 @@ contract StakePoolRewardFund is IStakePoolRewardFund {
         address _to
     ) external  {
         require(msg.sender == timelock, "StakePoolRewardFund: !timelock");
-        uint256 length = IStakePool(stakePool).rewardPoolInfoLength();
-        for (uint8 pid = 0; pid < length; ++pid) {
-            (address rewardToken,uint endRewardBlock) = IStakePool(stakePool).getEndRewardBlock(pid);
-            if (rewardToken == _token) {
-                // do not allow to drain reward token if less than 2 months after pool ends
-                require(block.number >= (endRewardBlock + (BLOCKS_PER_DAY * 30)), "StakePoolRewardFund: blockNumber < 30 days since endRewardBlock");
-            }
-        }
-        TransferHelper.safeTransfer(_token, _to, _amount);
+        require(IStakePool(stakePool).allowRecoverRewardToken(_token), "StakePoolRewardFund: not allow recover reward token");
     }
 }

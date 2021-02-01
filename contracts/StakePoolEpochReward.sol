@@ -36,8 +36,8 @@ contract StakePoolEpochReward is IStakePoolEpochReward {
 
     /* ========== STATE VARIABLES ========== */
 
-    address epochController;
-    address rewardToken;
+    address public override epochController;
+    address public override rewardToken;
 
     uint256 public withdrawLockupEpochs;
     uint256 public rewardLockupEpochs;
@@ -46,19 +46,21 @@ contract StakePoolEpochReward is IStakePoolEpochReward {
     Snapshot[] public snapshotHistory;
 
     address public override pair;
-    address public rewardFund;
+    address public override rewardFund;
     address public timelock;
     address public controller;
 
     uint public balance;
     uint private _unlocked = 1;
     bool private _initialized = false;
-    bool public emergencyWithdrawAllowed = false;
+    uint256 public constant BLOCKS_PER_DAY = 6528;
 
     constructor(address _controller, uint _version) public {
         controller = _controller;
-        timelock = _controller;
+        timelock = msg.sender;
         version = _version;
+        Snapshot memory genesisSnapshot = Snapshot({time : block.number, rewardReceived : 0, rewardPerShare : 0});
+        snapshotHistory.push(genesisSnapshot);
     }
 
     modifier lock() {
@@ -73,35 +75,79 @@ contract StakePoolEpochReward is IStakePoolEpochReward {
         _;
     }
 
-    modifier allowEmergencyWithdraw() {
-        require(emergencyWithdrawAllowed, "StakePoolEpochReward: !emergencyWithdrawAllowed");
+    modifier onlyEpochController() {
+        require(msg.sender == epochController, "StakePoolEpochReward: !epochController");
         _;
     }
 
     modifier updateReward(address _account) {
         if (_account != address(0)) {
-            UserInfo memory user = userInfo[_account];
+            UserInfo storage user = userInfo[_account];
             user.rewardEarned = earned(_account);
             user.lastSnapshotIndex = latestSnapshotIndex();
-            userInfo[_account] = user;
         }
         _;
     }
 
     // called once by the factory at time of deployment
-    function initialize(address _pair, uint256 _withdrawLockupEpochs, uint256 _rewardLockupEpochs, address _epochController, address _rewardToken, address _rewardFund, address _timelock) external override {
+    function initialize(address _pair, address _rewardFund, address _timelock, address _epochController, address _rewardToken,  uint256 _withdrawLockupEpochs, uint256 _rewardLockupEpochs) external {
         require(_initialized == false, "StakePoolEpochReward: Initialize must be false.");
         pair = _pair;
-        withdrawLockupEpochs = _withdrawLockupEpochs;
-        rewardLockupEpochs = _rewardLockupEpochs;
-        epochController = _epochController;
         rewardToken = _rewardToken;
         rewardFund = _rewardFund;
+        setEpochController(_epochController);
+        setLockUp(_withdrawLockupEpochs, _rewardLockupEpochs);
         timelock = _timelock;
         _initialized = true;
     }
 
-    /* ========== VIEW FUNCTIONS ========== */
+    /* ========== GOVERNANCE ========== */
+
+    function setEpochController(address _epochController) public override lock onlyTimeLock {
+        epochController = _epochController;
+        epoch();
+        nextEpochPoint();
+        nextEpochLength();
+        nextEpochAllocatedReward();
+    }
+
+    function setLockUp(uint256 _withdrawLockupEpochs, uint256 _rewardLockupEpochs) public override lock onlyTimeLock {
+        require(_withdrawLockupEpochs >= _rewardLockupEpochs && _withdrawLockupEpochs <= 56, "_withdrawLockupEpochs: out of range"); // <= 2 week
+        withdrawLockupEpochs = _withdrawLockupEpochs;
+        rewardLockupEpochs = _rewardLockupEpochs;
+    }
+
+    function allocateReward(uint256 _amount) external override lock onlyEpochController {
+        require(_amount > 0, "StakePoolEpochReward: Cannot allocate 0");
+        uint256 _before = IERC20(rewardToken).balanceOf(address(rewardFund));
+        TransferHelper.safeTransferFrom(rewardToken, msg.sender, rewardFund, _amount);
+        if (balance > 0) {
+            uint256 _after = IERC20(rewardToken).balanceOf(address(rewardFund));
+            _amount = _after.sub(_before);
+
+            // Create & add new snapshot
+            uint256 _prevRPS = getLatestSnapshot().rewardPerShare;
+            uint256 _nextRPS = _prevRPS.add(_amount.mul(1e18).div(balance));
+
+            Snapshot memory _newSnapshot = Snapshot({
+                time: block.number,
+                rewardReceived: _amount,
+                rewardPerShare: _nextRPS
+            });
+            emit AllocateReward(block.number, _amount);
+            snapshotHistory.push(_newSnapshot);
+        }
+    }
+
+    function allowRecoverRewardToken(address _token) external view override returns (bool) {
+        if (rewardToken == _token) {
+            // do not allow to drain reward token if less than 1 months after LatestSnapshot
+            if (block.number < (getLatestSnapshot().time + (BLOCKS_PER_DAY * 30))) {
+                return false;
+            }
+        }
+        return true;
+    }
 
     // =========== Epoch getters
 
@@ -109,12 +155,16 @@ contract StakePoolEpochReward is IStakePoolEpochReward {
         return IEpochController(epochController).epoch();
     }
 
-    function nextEpochPoint() external override view returns (uint256) {
+    function nextEpochPoint() public override view returns (uint256) {
         return IEpochController(epochController).nextEpochPoint();
     }
 
-    function nextEpochLength() external override view returns (uint256) {
+    function nextEpochLength() public override view returns (uint256) {
         return IEpochController(epochController).nextEpochLength();
+    }
+
+    function nextEpochAllocatedReward() public override view returns (uint256) {
+        return IEpochController(epochController).nextEpochAllocatedReward(address(this));
     }
 
     // =========== Snapshot getters
@@ -181,38 +231,43 @@ contract StakePoolEpochReward is IStakePoolEpochReward {
         uint _amount = IValueLiquidPair(pair).balanceOf(address(this)).sub(balance);
         require(_amount > 0, "StakePoolEpochReward: Invalid balance");
         balance = balance.add(_amount);
-        UserInfo memory user = userInfo[_account];
+        UserInfo storage user = userInfo[_account];
         user.epochTimerStart = epoch(); // reset timer
         user.amount = user.amount.add(_amount);
-        userInfo[_account] = user;
         emit Deposit(_account, _amount);
     }
 
     function removeStakeInternal(uint _amount) internal {
-        UserInfo memory user = userInfo[msg.sender];
-        require(user.epochTimerStart.add(withdrawLockupEpochs) <= epoch(), "StakePoolEpochReward: still in withdraw lockup");
+        UserInfo storage user = userInfo[msg.sender];
+        uint256 _epoch = epoch();
+        require(user.epochTimerStart.add(withdrawLockupEpochs) <= _epoch, "StakePoolEpochReward: still in withdraw lockup");
         require(user.amount >= _amount, "StakePoolEpochReward: invalid withdraw amount");
-        claimReward();
+        _claimReward(false);
         balance = balance.sub(_amount);
+        user.epochTimerStart = _epoch; // reset timer
         user.amount = user.amount.sub(_amount);
-        user = userInfo[msg.sender];
     }
 
-    function withdraw(uint _amount) external lock override {
+    function withdraw(uint _amount) public lock override {
         removeStakeInternal(_amount);
         IValueLiquidPair(pair).transfer(msg.sender, _amount);
         emit Withdraw(msg.sender, _amount);
     }
 
-    function claimReward() public override updateReward(msg.sender) {
-        UserInfo memory user = userInfo[msg.sender];
+    function exit() external {
+        withdraw(userInfo[msg.sender].amount);
+    }
+
+    function _claimReward(bool _lockChecked) internal updateReward(msg.sender) {
+        UserInfo storage user = userInfo[msg.sender];
         uint256 _reward = user.rewardEarned;
         if (_reward > 0) {
-            uint256 _epoch = epoch();
-            require(user.epochTimerStart.add(rewardLockupEpochs) <= _epoch, "Boardroom: still in reward lockup");
-            user.epochTimerStart = _epoch; // reset timer
+            if (_lockChecked) {
+                uint256 _epoch = epoch();
+                require(user.epochTimerStart.add(rewardLockupEpochs) <= _epoch, "StakePoolEpochReward: still in reward lockup");
+                user.epochTimerStart = _epoch; // reset timer
+            }
             user.rewardEarned = 0;
-            userInfo[msg.sender] = user;
             // Safe reward transfer, just in case if rounding error causes pool to not have enough reward amount
             uint256 _rewardBalance = IERC20(rewardToken).balanceOf(rewardFund);
             uint256 _paidAmount = _rewardBalance > _reward ? _reward : _rewardBalance;
@@ -221,13 +276,17 @@ contract StakePoolEpochReward is IStakePoolEpochReward {
         }
     }
 
+    function claimReward() public override {
+        _claimReward(true);
+    }
+
     // Withdraw without caring about rewards. EMERGENCY ONLY.
-    function emergencyWithdraw() external lock allowEmergencyWithdraw override {
-        UserInfo memory user = userInfo[msg.sender];
+    function emergencyWithdraw() external lock override {
+        require(IStakePoolController(controller).isAllowEmergencyWithdrawStakePool(address(this)),"StakePoolEpochReward: Not allow emergencyWithdraw");
+        UserInfo storage user = userInfo[msg.sender];
         uint amount = user.amount;
         balance = balance.sub(amount);
         user.amount = 0;
-        userInfo[msg.sender] = user;
         IValueLiquidPair(pair).transfer(msg.sender, amount);
     }
 

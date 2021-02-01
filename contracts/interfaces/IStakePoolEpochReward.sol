@@ -3,13 +3,18 @@
 pragma solidity 0.7.6;
 
 interface IStakePoolEpochReward {
+    event AllocateReward(uint256 blocktime, uint256 amount);
     event Deposit(address indexed account, uint256 amount);
     event PayRewardPool(uint256 indexed poolId, address indexed rewardToken, address indexed account, uint256 pendingReward, uint256 rebaseAmount, uint256 paidReward);
     event Withdraw(address indexed account, uint256 amount);
 
-    function version() external returns (uint);
-    function pair() external returns (address);
-    function initialize(address _pair, uint256 _withdrawLockupEpochs, uint256 _rewardLockupEpochs, address _epochController, address _rewardToken, address _rewardFund, address _timelock) external;
+    function version() external view returns (uint256);
+    function pair() external view returns (address);
+    function rewardToken() external view returns (address);
+    function rewardFund() external view returns (address);
+    function epochController() external view returns (address);
+
+    function allowRecoverRewardToken(address _token) external view returns (bool);
 
     function epoch() external view returns (uint256);
 
@@ -17,50 +22,58 @@ interface IStakePoolEpochReward {
 
     function nextEpochLength() external view returns (uint256);
 
-    function earned(address _account) external view returns (uint);
+    function nextEpochAllocatedReward() external view returns (uint256);
+
+    function earned(address _account) external view returns (uint256);
 
     function unlockWithdrawEpoch(address _account) external view returns (uint256);
 
     function unlockRewardEpoch(address _account) external view returns (uint256);
 
-    function stake(uint) external;
+    function stake(uint256) external;
 
     function stakeFor(address _account) external;
 
-    function withdraw(uint) external;
+    function withdraw(uint256) external;
 
     function claimReward() external;
 
     function emergencyWithdraw() external;
 
+    function setEpochController(address) external;
+
+    function setLockUp(uint256 _withdrawLockupEpochs, uint256 _rewardLockupEpochs) external;
+
+    function allocateReward(uint256 _amount) external;
+
     function removeLiquidity(
         address provider,
         address tokenA,
         address tokenB,
-        uint liquidity,
-        uint amountAMin,
-        uint amountBMin,
+        uint256 liquidity,
+        uint256 amountAMin,
+        uint256 amountBMin,
         address to,
-        uint deadline
-    ) external returns (uint amountA, uint amountB);
+        uint256 deadline
+    ) external returns (uint256 amountA, uint256 amountB);
 
     function removeLiquidityETH(
         address provider,
         address token,
-        uint liquidity,
-        uint amountTokenMin,
-        uint amountETHMin,
+        uint256 liquidity,
+        uint256 amountTokenMin,
+        uint256 amountETHMin,
         address to,
-        uint deadline
-    ) external returns (uint amountToken, uint amountETH);
+        uint256 deadline
+    ) external returns (uint256 amountToken, uint256 amountETH);
 
     function removeLiquidityETHSupportingFeeOnTransferTokens(
         address provider,
         address token,
-        uint liquidity,
-        uint amountTokenMin,
-        uint amountETHMin,
+        uint256 liquidity,
+        uint256 amountTokenMin,
+        uint256 amountETHMin,
         address to,
-        uint deadline
-    ) external returns (uint amountETH);
+        uint256 deadline
+    ) external returns (uint256 amountETH);
 }

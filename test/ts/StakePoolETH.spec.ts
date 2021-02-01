@@ -33,6 +33,7 @@ import {
 import {ParamType} from "@ethersproject/abi/src.ts/fragments";
 import {getApprovalDigest, MaxUint256} from "./shared/common";
 import {ecsign} from "ethereumjs-util";
+import {encodePoolInfo} from "./StakePoolController.spec";
 
 function encodeParameters(types: Array<string | ParamType>, values: Array<any>) {
 	const abi = new ethers.utils.AbiCoder();
@@ -93,8 +94,7 @@ describe('StakePoolETH', () => {
 		if (rewardMultiplier != ADDRESS_ZERO) {
 			await stakePoolController.setWhitelistRewardMultiplier(rewardMultiplier, true);
 		}
-		let poolRewardInfo = {
-			rewardToken: rewardToken1.address,
+		let poolRewardInfo = encodePoolInfo({
 			rewardRebaser: rewardRebaser,
 			rewardMultiplier: rewardMultiplier,
 			startBlock: latestBlockNumber + 1,
@@ -104,9 +104,8 @@ describe('StakePoolETH', () => {
 			startVestingBlock: 0,
 			endVestingBlock: 0,
 			unstakingFrozenTime: 0,
-			rewardFundAmount: toWei(100),
-		};
-		await stakePoolController.connect(wallet).create(version, pair.address, 3600 * 48, poolRewardInfo, 0);
+		});
+		await stakePoolController.connect(wallet).create(version, pair.address,rewardToken1.address, toWei(100), 3600 * 48, poolRewardInfo, 0);
 		const stakePoolAddress = await stakePoolController.allStakePools(0);
 		stakePool = StakePoolFactory.connect(stakePoolAddress, wallet);
 		await stakePoolController.setWhitelistStakingFor(v2Pair.router.address, true);
@@ -228,6 +227,8 @@ describe('StakePoolETH', () => {
 		it('emergencyWithdraw', async () => {
 			await pair.approve(stakePool.address, toWei(3))
 			await stakePool.stake(toWei(3))
+			await expect(stakePool.emergencyWithdraw()).to.revertedWith("StakePool: Not allow emergencyWithdraw")
+			await stakePoolController.setAllowEmergencyWithdrawStakePool(stakePool.address, true)
 			await expect(async () => stakePool.emergencyWithdraw())
 				.changeTokenBalance(pair, wallet, toWei("3"))
 			expect((await stakePool.userInfo(wallet.address)).amount).to.eq(toWei("0"));
